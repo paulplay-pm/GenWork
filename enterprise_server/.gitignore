@@ -1,0 +1,12 @@
+node_modules/
+dist/
+web-dist/
+web/node_modules/
+web/*.tsbuildinfo
+*.log
+.env
+.env.local
+.DS_Store
+coverage/
+.keyfrom-build/
+.tmp-*

@@ -1,0 +1,3 @@
+-- v2 placeholder. Enables partitioning of token_usage by month:
+--   ALTER TABLE token_usage ... PARTITION BY RANGE (ts);
+-- Left empty for v1; migrate.ts skips files starting with '-- v2'.

@@ -1,0 +1,87 @@
+import {
+  type AppConfig,
+  FontPreferences,
+  normalizeFontPreference,
+} from '../config';
+
+type TypographyConfig = Pick<AppConfig, 'uiFontSize' | 'codeFontSize'>;
+
+// TEXT_SIZE_BASE and LINE_HEIGHT_BASE are designed at a 14px UI font size.
+// Scale relative to this baseline, not FontPreferences.UiFontSizeDefault, so
+// changing the default preference never rescales an explicitly stored size.
+const UI_FONT_SCALE_BASELINE = 14;
+
+const TEXT_SIZE_BASE = {
+  xs: 12,
+  sm: 14,
+  base: 16,
+  lg: 18,
+  xl: 20,
+  '2xl': 24,
+  '3xl': 30,
+  '4xl': 36,
+  markdown: 14,
+  markdownH2: 18,
+  markdownH3: 16,
+  markdownH4: 15,
+  promptLarge: 15,
+  sidebarCompact: 13,
+} as const;
+
+const LINE_HEIGHT_BASE = {
+  xs: 16,
+  sm: 20,
+  base: 24,
+  lg: 28,
+  xl: 28,
+  '2xl': 32,
+  '3xl': 36,
+  '4xl': 40,
+  markdown: 22,
+  markdownCompact: 21,
+  prompt: 22,
+  promptLarge: 23,
+} as const;
+
+const setPxVariable = (
+  root: HTMLElement,
+  name: string,
+  value: number,
+): void => {
+  root.style.setProperty(name, `${Math.round(value)}px`);
+};
+
+export const resolveTypographyPreferences = (config: TypographyConfig) => ({
+  uiFontSize: normalizeFontPreference(
+    config.uiFontSize,
+    FontPreferences.UiFontSizeDefault,
+    FontPreferences.UiFontSizeMin,
+    FontPreferences.UiFontSizeMax,
+  ),
+  codeFontSize: normalizeFontPreference(
+    config.codeFontSize,
+    FontPreferences.CodeFontSizeDefault,
+    FontPreferences.CodeFontSizeMin,
+    FontPreferences.CodeFontSizeMax,
+  ),
+});
+
+export const applyTypographyPreferences = (config: TypographyConfig): void => {
+  if (typeof document === 'undefined') {
+    return;
+  }
+
+  const { uiFontSize, codeFontSize } = resolveTypographyPreferences(config);
+  const root = document.documentElement;
+  const scale = uiFontSize / UI_FONT_SCALE_BASELINE;
+
+  root.style.setProperty('--genwork-ui-font-size', `${uiFontSize}px`);
+  root.style.setProperty('--genwork-code-font-size', `${codeFontSize}px`);
+
+  Object.entries(TEXT_SIZE_BASE).forEach(([key, value]) => {
+    setPxVariable(root, `--genwork-text-${key}`, value * scale);
+  });
+  Object.entries(LINE_HEIGHT_BASE).forEach(([key, value]) => {
+    setPxVariable(root, `--genwork-leading-${key}`, value * scale);
+  });
+};

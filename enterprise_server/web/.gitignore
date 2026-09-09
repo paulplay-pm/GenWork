@@ -1,0 +1,6 @@
+# Visual regression baselines (generated, regenerable via npm run test:visual:update)
+tests/visual/screenshots/
+
+# Playwright test debugging output
+test-results/
+playwright-report/

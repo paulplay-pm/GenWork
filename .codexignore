@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+SKILLs/**/node_modules/
+
+# Build and packaged outputs
+dist/
+dist-electron/
+build-tar/
+release/
+out/
+
+# Runtime bundles and generated vendor payloads
+vendor/openclaw-runtime/
+vendor/openclaw-plugins/
+resources/mingit/
+resources/python-win/
+resources/MinGit-*.zip
+resources/PortableGit-*.7z.exe
+resources/python-*.zip
+
+# Local tool and agent state
+.claude/
+.cursor/
+.codebuddy/
+.work/
+.cowork-temp/
+.playwright-mcp/
+.sisyphus/
+.superpowers/
+.diagram/
+.gstack/
+.idea/
+.vscode/
+.keyfrom-build/
+sandbox/
+
+# Skill runtime artifacts
+SKILLs/**/.connection
+SKILLs/**/.server.log
+SKILLs/**/.server.pid
+SKILLs/**/.venv/
+SKILLs/**/dist/
+
+# Logs, caches, and local environment
+*.log
+.DS_Store
+.env
+.work.env
+coverage/
+__pycache__/

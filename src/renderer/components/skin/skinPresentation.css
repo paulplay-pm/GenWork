@@ -1,0 +1,165 @@
+[data-skin-presentation="immersive_shell"] {
+  background-color: var(--genwork-skin-panel) !important;
+}
+
+[data-skin-presentation="immersive_shell"][data-skin-settings="true"],
+[data-skin-presentation="immersive_shell"][data-skin-task-search="true"],
+[data-skin-presentation="immersive_shell"]
+  :is(
+    [data-skin-sidebar],
+    [data-skin-app-titlebar],
+    [data-skin-session-titlebar],
+    [data-skin-prompt-input],
+    [data-skin-quick-actions],
+    [data-skin-prompt-panel],
+    [data-skin-management-page]
+  ) {
+  --genwork-primary: var(--genwork-skin-accent);
+  --genwork-primary-foreground: var(--genwork-skin-accent-foreground);
+  --genwork-primary-hover: color-mix(
+    in srgb,
+    var(--genwork-skin-accent) 82%,
+    var(--genwork-skin-foreground)
+  );
+  --genwork-primary-muted: color-mix(in srgb, var(--genwork-skin-accent) 15%, transparent);
+  --genwork-accent: var(--genwork-skin-accent-alt);
+  --genwork-accent-foreground: var(--genwork-skin-foreground);
+  --genwork-background: var(--genwork-skin-canvas);
+  --genwork-foreground: var(--genwork-skin-foreground);
+  --genwork-surface: var(--genwork-skin-panel);
+  --genwork-surface-foreground: var(--genwork-skin-foreground);
+  --genwork-surface-raised: var(--genwork-skin-panel-raised);
+  --genwork-surface-overlay: color-mix(in srgb, var(--genwork-skin-panel) 94%, transparent);
+  --genwork-text-primary: var(--genwork-skin-foreground);
+  --genwork-text-secondary: var(--genwork-skin-muted);
+  --genwork-text-muted: color-mix(in srgb, var(--genwork-skin-muted) 78%, transparent);
+  --genwork-border: var(--genwork-skin-border);
+  --genwork-border-subtle: color-mix(in srgb, var(--genwork-skin-border) 55%, transparent);
+  --genwork-input-border: var(--genwork-skin-border);
+  --genwork-scroll-thumb: color-mix(in srgb, var(--genwork-skin-accent) 48%, transparent);
+  --genwork-scroll-thumb-hover: var(--genwork-skin-accent);
+}
+
+[data-skin-presentation="immersive_shell"][data-skin-task-search="true"] {
+  background-color: var(--genwork-skin-panel) !important;
+}
+
+[data-skin-presentation="immersive_shell"][data-skin-task-search="true"]
+  [data-skin-search-result-active="true"] {
+  background-color: var(--genwork-skin-panel-raised) !important;
+}
+
+[data-skin-presentation="immersive_shell"] [data-skin-cowork-frame="true"],
+[data-skin-presentation="immersive_shell"] [data-skin-cowork="true"],
+[data-skin-presentation="immersive_shell"] [data-skin-management-frame="true"] {
+  background-color: var(--genwork-skin-canvas) !important;
+  border-color: color-mix(in srgb, var(--genwork-skin-border) 55%, transparent) !important;
+}
+
+[data-skin-presentation="immersive_shell"] [data-skin-management-page="true"] {
+  background-color: color-mix(
+    in srgb,
+    var(--genwork-skin-canvas) 40%,
+    transparent
+  ) !important;
+}
+
+[data-skin-presentation="immersive_shell"] [data-skin-management-toolbar="true"] {
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--genwork-skin-canvas) 18%, transparent) 0%,
+    color-mix(in srgb, var(--genwork-skin-canvas) 10%, transparent) 76%,
+    transparent 100%
+  ) !important;
+  backdrop-filter: blur(14px) saturate(0.82);
+}
+
+[data-skin-presentation="immersive_shell"] [data-skin-sidebar] {
+  color: var(--genwork-skin-foreground);
+  background: linear-gradient(
+    155deg,
+    var(--genwork-skin-panel-raised),
+    var(--genwork-skin-panel) 48%,
+    color-mix(in srgb, var(--genwork-skin-panel) 86%, var(--genwork-skin-canvas))
+  ) !important;
+  box-shadow: none;
+}
+
+[data-skin-presentation="immersive_shell"]
+  :is([data-skin-app-titlebar], [data-skin-session-titlebar]) {
+  color: var(--genwork-skin-foreground);
+  background: linear-gradient(
+    155deg,
+    var(--genwork-skin-panel-raised),
+    var(--genwork-skin-panel) 48%,
+    color-mix(in srgb, var(--genwork-skin-panel) 86%, var(--genwork-skin-canvas))
+  ) !important;
+}
+
+[data-skin-presentation="immersive_shell"] [data-skin-app-titlebar] {
+  border-bottom-color: transparent !important;
+}
+
+[data-skin-presentation="immersive_shell"] [data-skin-session-titlebar] {
+  border-color: color-mix(in srgb, var(--genwork-skin-border) 55%, transparent) !important;
+}
+
+[data-skin-presentation="immersive_shell"] [data-skin-artifact-add-tab="true"] {
+  background-color: transparent !important;
+}
+
+[data-skin-presentation="immersive_shell"] [data-skin-sidebar] button:hover {
+  background-color: color-mix(in srgb, var(--genwork-skin-accent) 10%, transparent) !important;
+}
+
+[data-skin-presentation="immersive_shell"] [data-skin-sidebar]
+  :is([aria-current="page"], [aria-selected="true"]) {
+  background-color: color-mix(in srgb, var(--genwork-skin-accent) 16%, transparent) !important;
+  box-shadow: inset 2px 0 var(--genwork-skin-accent);
+}
+
+[data-skin-presentation="immersive_shell"] [data-skin-home-copy] h2 {
+  color: var(--genwork-skin-foreground) !important;
+  text-shadow: 0 1px 10px color-mix(in srgb, var(--genwork-skin-canvas) 72%, transparent);
+}
+
+[data-skin-presentation="immersive_shell"] [data-skin-home-copy] p {
+  color: var(--genwork-skin-muted) !important;
+}
+
+[data-skin-presentation="immersive_shell"] [data-skin-quick-actions] button,
+[data-skin-presentation="immersive_shell"] [data-skin-prompt-panel] button {
+  box-shadow: 0 8px 22px color-mix(in srgb, var(--genwork-skin-canvas) 28%, transparent);
+  backdrop-filter: blur(8px) saturate(1.04);
+}
+
+.skin-ambient-effects span {
+  position: absolute;
+  width: 4px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--genwork-skin-accent);
+  box-shadow: 0 0 10px 2px color-mix(in srgb, var(--genwork-skin-accent) 42%, transparent);
+  opacity: 0.45;
+  animation: genwork-skin-particle-pulse 5s ease-in-out infinite;
+}
+
+.skin-ambient-effects span:nth-child(1) { left: 8%; top: 18%; }
+.skin-ambient-effects span:nth-child(2) { left: 27%; top: 72%; animation-delay: -1.2s; }
+.skin-ambient-effects span:nth-child(3) { left: 46%; top: 14%; background: var(--genwork-skin-accent-alt); animation-delay: -2.8s; }
+.skin-ambient-effects span:nth-child(4) { left: 63%; top: 61%; animation-delay: -0.7s; }
+.skin-ambient-effects span:nth-child(5) { left: 78%; top: 24%; background: var(--genwork-skin-accent-alt); animation-delay: -3.4s; }
+.skin-ambient-effects span:nth-child(6) { left: 91%; top: 76%; animation-delay: -2s; }
+.skin-ambient-effects span:nth-child(7) { left: 58%; top: 88%; background: var(--genwork-skin-accent-alt); animation-delay: -4.1s; }
+.skin-ambient-effects span:nth-child(8) { left: 84%; top: 47%; animation-delay: -1.8s; }
+
+@keyframes genwork-skin-particle-pulse {
+  0%, 100% { opacity: 0.24; transform: scale(0.85); }
+  50% { opacity: 0.62; transform: scale(1.12); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skin-ambient-effects span {
+    animation: none;
+  }
+}

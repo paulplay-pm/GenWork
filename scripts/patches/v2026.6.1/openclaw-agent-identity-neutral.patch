@@ -1,0 +1,35 @@
+diff --git a/src/agents/cli-runner/prepare.test.ts b/src/agents/cli-runner/prepare.test.ts
+index d625242..6707e05 100644
+--- a/src/agents/cli-runner/prepare.test.ts
++++ b/src/agents/cli-runner/prepare.test.ts
+@@ -669,7 +669,7 @@ describe("shouldSkipLocalCliCredentialEpoch", () => {
+
+       expect(context.params.prompt).toBe("latest ask");
+       expect(context.systemPrompt).toContain(
+-        "You are a personal assistant running inside OpenClaw.",
++        "You are a personal assistant.",
+       );
+       expect(context.systemPrompt).toContain("Current model identity: test-cli/test-model.");
+       expect(context.systemPrompt).not.toContain("hook exploded");
+diff --git a/src/agents/system-prompt.ts b/src/agents/system-prompt.ts
+index 36090b8..b090f97 100644
+--- a/src/agents/system-prompt.ts
++++ b/src/agents/system-prompt.ts
+@@ -948,7 +948,7 @@ export function buildAgentSystemPrompt(params: {
+
+   // For "none" mode, return just the basic identity line
+   if (promptMode === "none") {
+-    return ["You are a personal assistant running inside OpenClaw.", modelIdentityLine]
++    return ["You are a personal assistant.", modelIdentityLine]
+       .filter(Boolean)
+       .join("\n");
+   }
+@@ -1002,7 +1002,7 @@ export function buildAgentSystemPrompt(params: {
+   });
+   const stablePrefix = cacheStablePromptPrefix(stablePrefixCacheKey, () => {
+     const lines = [
+-      "You are a personal assistant running inside OpenClaw.",
++      "You are a personal assistant.",
+       "",
+       "## Tooling",
+       "Available tools are policy-filtered. Names are case-sensitive; call exactly as listed.",

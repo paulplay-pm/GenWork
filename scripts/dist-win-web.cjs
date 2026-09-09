@@ -1,0 +1,154 @@
+'use strict';
+
+// Channel web-installer build entry. Wraps the dist:win chain so that every
+// web-installer variable is scoped to the spawned build only — nothing is
+// read from or written to the caller's shell environment, which makes builds
+// reproducible from any terminal state (see GENWORK_WEB_* handling below).
+
+const { spawnSync } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const { parseArgs } = require('util');
+
+const { BuildEnv, CHANNEL_SCOPED_ENV_VARS } = require('./build-env.cjs');
+const { normalizeKeyfrom } = require('./build-keyfrom.cjs');
+
+const REPO_ROOT = path.join(__dirname, '..');
+const PLACEHOLDER_BASE_URL = 'https://placeholder.invalid/web-package';
+
+const USAGE = `Usage:
+  npm run dist:win:web -- --keyfrom <channel> [--pkg-base-url <cdn-dir> | --pkg-url <package-url>]
+
+Modes:
+  --pkg-base-url  one-pass build; the installer downloads <dir>/<keyfrom>/GenWork-<version>-x64.nsis.7z
+  --pkg-url       stub-only rebuild with the exact package URL (upload-first flow, e.g. NOS)
+  (no URL flag)   full build with a placeholder URL, to produce the .nsis.7z for upload;
+                  the unusable WebSetup exe from this pass is deleted afterwards
+  --dry-run       print the resolved build plan without building`;
+
+function fail(message) {
+  console.error(`[WebBuild] ${message}`);
+  console.error(USAGE);
+  process.exit(1);
+}
+
+let values;
+try {
+  ({ values } = parseArgs({
+    options: {
+      keyfrom: { type: 'string' },
+      'pkg-url': { type: 'string' },
+      'pkg-base-url': { type: 'string' },
+      'dry-run': { type: 'boolean', default: false },
+    },
+  }));
+} catch (error) {
+  fail(`invalid arguments: ${error.message}`);
+}
+
+const keyfrom = (values.keyfrom || '').trim().toLowerCase();
+if (!keyfrom) {
+  fail('--keyfrom is required so the channel is always explicit.');
+}
+if (normalizeKeyfrom(keyfrom) !== keyfrom) {
+  fail(`invalid keyfrom "${values.keyfrom}": use 1-64 characters of a-z 0-9 _ -`);
+}
+
+const pkgUrl = (values['pkg-url'] || '').trim();
+const pkgBaseUrl = (values['pkg-base-url'] || '').trim();
+if (pkgUrl && pkgBaseUrl) {
+  fail('--pkg-url and --pkg-base-url are mutually exclusive.');
+}
+
+// Leftover shell variables (e.g. from a previous $env: assignment) must never
+// leak into a build; everything relevant is set explicitly below.
+const env = { ...process.env };
+for (const name of CHANNEL_SCOPED_ENV_VARS) {
+  if (env[name] !== undefined) {
+    console.warn(`[WebBuild] ignoring inherited ${name}=${env[name]} from the shell`);
+    delete env[name];
+  }
+}
+env[BuildEnv.Keyfrom] = keyfrom;
+env[BuildEnv.WebInstaller] = '1';
+
+const stubOnly = pkgUrl !== '';
+const usesPlaceholder = !stubOnly && pkgBaseUrl === '';
+let command;
+let args;
+if (stubOnly) {
+  for (const dir of ['dist', 'dist-electron']) {
+    if (!fs.existsSync(path.join(REPO_ROOT, dir))) {
+      fail(`${dir}/ not found — run the first pass (npm run dist:win:web -- --keyfrom ${keyfrom}) before the stub-only pass.`);
+    }
+  }
+  // The stub-only pass skips prebuild, so .keyfrom-build still holds the first
+  // pass's channel; a mismatch would name the stub after one channel while the
+  // uploaded package carries another.
+  const keyfromBuildPath = path.join(REPO_ROOT, '.keyfrom-build', 'keyfrom.json');
+  if (fs.existsSync(keyfromBuildPath)) {
+    let firstPassKeyfrom;
+    try {
+      firstPassKeyfrom = JSON.parse(fs.readFileSync(keyfromBuildPath, 'utf8'))?.keyfrom;
+    } catch {
+      firstPassKeyfrom = undefined; // unreadable file: fall through to the build
+    }
+    if (firstPassKeyfrom && firstPassKeyfrom !== keyfrom) {
+      fail(
+        `--keyfrom ${keyfrom} does not match the first pass (${firstPassKeyfrom}). ` +
+          `Rerun the first pass with --keyfrom ${keyfrom}, or pass --keyfrom ${firstPassKeyfrom}.`,
+      );
+    }
+  }
+  env[BuildEnv.WebPkgUrl] = pkgUrl;
+  command = 'npx';
+  args = ['electron-builder', '--win', 'nsis-web', '--x64', '--config', 'scripts/electron-builder-config.cjs'];
+} else {
+  env[BuildEnv.WebPkgBaseUrl] = pkgBaseUrl || PLACEHOLDER_BASE_URL;
+  command = 'npm';
+  args = ['run', 'dist:win'];
+}
+
+const mode = stubOnly ? 'stub-only' : usesPlaceholder ? 'full-build-with-placeholder-url' : 'full-build-with-base-url';
+console.log(`[WebBuild] keyfrom=${keyfrom} mode=${mode}`);
+console.log(`[WebBuild] package ${stubOnly ? 'url' : 'base url'}: ${stubOnly ? pkgUrl : env[BuildEnv.WebPkgBaseUrl]}`);
+if (usesPlaceholder) {
+  console.log('[WebBuild] no URL flag given: building with a placeholder so the .nsis.7z can be uploaded first.');
+}
+
+if (values['dry-run']) {
+  console.log(`[WebBuild] dry-run: would execute \`${command} ${args.join(' ')}\``);
+  process.exit(0);
+}
+
+const result = spawnSync(command, args, {
+  cwd: REPO_ROOT,
+  env,
+  stdio: 'inherit',
+  shell: true,
+});
+if (result.status !== 0) {
+  process.exit(result.status ?? 1);
+}
+
+if (usesPlaceholder) {
+  // The stub from this pass points at the placeholder URL and must never be
+  // shipped; remove it so only the real second-pass stub can reach a landing page.
+  const releaseDir = path.join(REPO_ROOT, 'release');
+  let removed = 0;
+  if (fs.existsSync(releaseDir)) {
+    for (const name of fs.readdirSync(releaseDir)) {
+      if (name.includes('WebSetup')) {
+        fs.rmSync(path.join(releaseDir, name), { force: true });
+        console.log(`[WebBuild] deleted throwaway ${name}`);
+        removed += 1;
+      }
+    }
+  }
+  if (removed === 0) {
+    console.warn('[WebBuild] no WebSetup artifact found to delete; check the build output.');
+  }
+  const version = require('../package.json').version;
+  console.log(`[WebBuild] next: upload release/GenWork-${version}-x64.nsis.7z, then run`);
+  console.log(`[WebBuild]   npm run dist:win:web -- --keyfrom ${keyfrom} --pkg-url <uploaded-url>`);
+}

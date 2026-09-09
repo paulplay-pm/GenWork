@@ -1,0 +1,12 @@
+/**
+ * IM Gateway Module Index
+ * Re-exports all IM gateway related modules
+ */
+
+export * from './types';
+export { IMStore } from './imStore';
+export { IMChatHandler } from './imChatHandler';
+export { IMGenworkHandler, type IMGenworkHandlerOptions } from './imGenworkHandler';
+export { IMGatewayManager, type IMGatewayManagerOptions } from './imGatewayManager';
+export { parseMediaMarkers, stripMediaMarkers } from './dingtalkMediaParser';
+export { buildIMMediaInstruction } from './imMediaInstruction';

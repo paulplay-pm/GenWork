@@ -1,0 +1,85 @@
+{
+  "version": 1,
+  "actions": [
+    {
+      "id": "pptx",
+      "icon": "PresentationChartBarIcon",
+      "color": "#F59E0B",
+      "skillMapping": "pptx",
+      "prompts": [
+        {
+          "id": "pptx-work-report"
+        },
+        {
+          "id": "pptx-content-research"
+        },
+        {
+          "id": "pptx-training"
+        },
+        {
+          "id": "pptx-ai-intro"
+        }
+      ]
+    },
+    {
+      "id": "data-analysis",
+      "icon": "ChartBarIcon",
+      "color": "#8B5CF6",
+      "skillMapping": "xlsx",
+      "prompts": [
+        {
+          "id": "excel-summary"
+        },
+        {
+          "id": "image-to-excel"
+        },
+        {
+          "id": "word-report"
+        },
+        {
+          "id": "multi-excel-merge"
+        }
+      ]
+    },
+    {
+      "id": "doc-writing",
+      "icon": "DocumentTextIcon",
+      "color": "#10B981",
+      "skillMapping": "docx",
+      "prompts": [
+        {
+          "id": "doc-meeting-minutes"
+        },
+        {
+          "id": "doc-weekly-report"
+        },
+        {
+          "id": "doc-proposal"
+        },
+        {
+          "id": "doc-polish"
+        }
+      ]
+    },
+    {
+      "id": "website",
+      "icon": "GlobeAltIcon",
+      "color": "#3B82F6",
+      "skillMapping": "frontend-design",
+      "prompts": [
+        {
+          "id": "web-resume"
+        },
+        {
+          "id": "web-store"
+        },
+        {
+          "id": "web-event"
+        },
+        {
+          "id": "web-survey"
+        }
+      ]
+    }
+  ]
+}

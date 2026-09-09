@@ -1,0 +1,25 @@
+.genwork-sheet-preview {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background: #fff;
+}
+
+.genwork-sheet-preview .fortune-container {
+  height: 100%;
+  width: 100%;
+  border: 0;
+  font-family: inherit;
+}
+
+.genwork-sheet-preview .fortune-workarea {
+  display: none;
+}
+
+.genwork-sheet-preview .fortune-stat-area {
+  min-height: 22px;
+}
+
+.genwork-sheet-preview .luckysheet-sheets-bar {
+  border-top-color: #e5e7eb;
+}

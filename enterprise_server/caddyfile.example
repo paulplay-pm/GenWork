@@ -1,0 +1,15 @@
+# Variant 1: public host with auto-issued cert
+api.genwork.example.com {
+    reverse_proxy 127.0.0.1:8787 {
+        transport http {
+            read_timeout 120s
+        }
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+}
+
+# Variant 2: internal LAN, no TLS (customer terminates elsewhere)
+:80 {
+    reverse_proxy 127.0.0.1:8787
+}

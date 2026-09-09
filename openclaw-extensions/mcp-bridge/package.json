@@ -1,0 +1,14 @@
+{
+  "name": "@genwork/openclaw-mcp-bridge",
+  "version": "0.0.0",
+  "description": "Expose Genwork-managed MCP servers as native OpenClaw tools.",
+  "type": "module",
+  "dependencies": {
+    "@sinclair/typebox": "0.34.49"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

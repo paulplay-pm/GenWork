@@ -1,0 +1,36 @@
+{
+  "name": "@genwork/enterprise-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --env-file=.env src/server.ts",
+    "test": "vitest run",
+    "web:install": "npm install --prefix web --no-workspaces --force --ignore-scripts --engine-strict=false",
+    "web:dev": "npm run dev --prefix web",
+    "web:build": "npm run build --prefix web",
+    "web:test": "npm run test --prefix web",
+    "reinit": "tsx --env-file=.env src/cli/reinit.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node --enable-source-maps dist/server.js",
+    "genwork-server": "node --enable-source-maps dist/cli/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@types/node": "^24.13.3",
+    "adm-zip": "^0.6.0",
+    "bcryptjs": "^3.0.3",
+    "hono": "^4.13.4",
+    "jose": "^5.10.0",
+    "pg": "^8.23.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.2.17",
+    "@types/adm-zip": "^0.5.8",
+    "@types/bcryptjs": "^2.4.6",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3",
+    "vitest": "^1.6.0"
+  }
+}

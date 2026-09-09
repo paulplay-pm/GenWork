@@ -1,0 +1,41 @@
+name: genwork-enterprise
+
+services:
+  app:
+    # When IMAGE_REPO is unset, the compose file points at the
+    # script-built tag (single-segment "enterprise-server"). Override to a
+    # registry path when pulling from a registry, e.g.
+    # IMAGE_REPO=registry.internal/genwork.
+    image: ${IMAGE_REPO:-enterprise-server}:${IMAGE_TAG:-latest}
+    env_file: .env
+    # Override DATABASE_URL inside the container to point at the host's
+    # Postgres via host.docker.internal. The .env value uses "localhost"
+    # for dev (npm run dev on the host) and would resolve to the
+    # container's own loopback here, so the override is required.
+    # Set DATABASE_URL_HOST yourself if your .env name is different.
+    environment:
+      DATABASE_URL: postgres://genwork:genwork@host.docker.internal:5434/genwork
+    restart: unless-stopped
+    # Map "host.docker.internal" to the host's loopback. DATABASE_URLs in
+    # .env typically use "localhost"; rewrite those to host.docker.internal
+    # or set DATABASE_URL directly. The extra_hosts entry covers both
+    # Docker Desktop (Mac/Windows) and recent Linux engines that resolve
+    # host.docker.internal to the host gateway.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - genwork_data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:'+process.env.PORT+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+
+volumes:
+  genwork_data:

@@ -1,0 +1,178 @@
+import { expect, test } from 'vitest';
+
+import {
+  buildSelectedTextPromptSection,
+  COWORK_SELECTED_TEXT_MAX_CHARS_PER_SNIPPET,
+  COWORK_SELECTED_TEXT_MAX_SNIPPETS,
+  type CoworkSelectedTextSnippet,
+  CoworkSelectedTextSource,
+  CoworkSelectedTextValidationError,
+  normalizeCoworkSelectedTextSnippets,
+} from './selectedText';
+
+const createSnippet = (
+  text: string,
+  overrides: Partial<CoworkSelectedTextSnippet> = {},
+): CoworkSelectedTextSnippet => ({
+  id: `snippet-${text.length}`,
+  text,
+  sourceMessageId: 'assistant-1',
+  sourceMessageType: CoworkSelectedTextSource.AssistantMessage,
+  createdAt: 1,
+  ...overrides,
+});
+
+test('normalizes missing selected text snippets to an empty array', () => {
+  expect(normalizeCoworkSelectedTextSnippets(undefined)).toEqual({
+    success: true,
+    snippets: [],
+  });
+});
+
+test('rejects malformed selected text snippets', () => {
+  expect(normalizeCoworkSelectedTextSnippets('bad')).toEqual({
+    success: false,
+    error: CoworkSelectedTextValidationError.Invalid,
+  });
+  expect(normalizeCoworkSelectedTextSnippets([createSnippet('  ')])).toEqual({
+    success: false,
+    error: CoworkSelectedTextValidationError.Invalid,
+  });
+});
+
+test('rejects selected text snippet limits', () => {
+  expect(normalizeCoworkSelectedTextSnippets([
+    createSnippet('x'.repeat(COWORK_SELECTED_TEXT_MAX_CHARS_PER_SNIPPET + 1)),
+  ])).toEqual({
+    success: false,
+    error: CoworkSelectedTextValidationError.TooLong,
+  });
+  expect(normalizeCoworkSelectedTextSnippets(
+    Array.from({ length: COWORK_SELECTED_TEXT_MAX_SNIPPETS + 1 }, (_, index) => (
+      createSnippet(`text-${index}`, { id: `snippet-${index}`, sourceMessageId: `assistant-${index}` })
+    )),
+  )).toEqual({
+    success: false,
+    error: CoworkSelectedTextValidationError.TooMany,
+  });
+  expect(normalizeCoworkSelectedTextSnippets([
+    createSnippet('a'.repeat(COWORK_SELECTED_TEXT_MAX_CHARS_PER_SNIPPET), { id: 'a' }),
+    createSnippet('b'.repeat(COWORK_SELECTED_TEXT_MAX_CHARS_PER_SNIPPET), { id: 'b' }),
+    createSnippet('c'.repeat(COWORK_SELECTED_TEXT_MAX_CHARS_PER_SNIPPET), { id: 'c' }),
+    createSnippet('d', { id: 'd' }),
+  ])).toEqual({
+    success: false,
+    error: CoworkSelectedTextValidationError.TotalTooLong,
+  });
+});
+
+test('strips NUL characters from selected text snippets', () => {
+  const nul = String.fromCharCode(0);
+  expect(normalizeCoworkSelectedTextSnippets([
+    createSnippet(`quo${nul}ted${nul}`, { id: 'nul-text' }),
+  ])).toEqual({
+    success: true,
+    snippets: [
+      {
+        id: 'nul-text',
+        text: 'quoted',
+        sourceMessageId: 'assistant-1',
+        sourceMessageType: CoworkSelectedTextSource.AssistantMessage,
+        sourceId: 'assistant-1',
+        sourceType: CoworkSelectedTextSource.AssistantMessage,
+        createdAt: 1,
+      },
+    ],
+  });
+});
+
+test('rejects duplicate selected text snippets from the same source', () => {
+  expect(normalizeCoworkSelectedTextSnippets([
+    createSnippet('same', { id: 'one' }),
+    createSnippet('same', { id: 'two' }),
+  ])).toEqual({
+    success: false,
+    error: CoworkSelectedTextValidationError.Duplicate,
+  });
+});
+
+test('normalizes artifact selected text snippets', () => {
+  expect(normalizeCoworkSelectedTextSnippets([
+    {
+      id: 'artifact-md',
+      text: '  markdown excerpt  ',
+      sourceType: CoworkSelectedTextSource.ArtifactMarkdown,
+      sourceId: 'artifact-1',
+      artifactId: 'artifact-1',
+      sourceTitle: 'README.md',
+      sourcePath: '/tmp/project/README.md',
+      createdAt: 1,
+    },
+    {
+      id: 'artifact-log',
+      text: 'log excerpt',
+      sourceType: CoworkSelectedTextSource.ArtifactText,
+      sourceId: 'artifact-2',
+      artifactId: 'artifact-2',
+      sourceTitle: 'app.log',
+      createdAt: 2,
+    },
+  ])).toEqual({
+    success: true,
+    snippets: [
+      {
+        id: 'artifact-md',
+        text: 'markdown excerpt',
+        sourceType: CoworkSelectedTextSource.ArtifactMarkdown,
+        sourceId: 'artifact-1',
+        artifactId: 'artifact-1',
+        sourceTitle: 'README.md',
+        sourcePath: '/tmp/project/README.md',
+        createdAt: 1,
+      },
+      {
+        id: 'artifact-log',
+        text: 'log excerpt',
+        sourceType: CoworkSelectedTextSource.ArtifactText,
+        sourceId: 'artifact-2',
+        artifactId: 'artifact-2',
+        sourceTitle: 'app.log',
+        createdAt: 2,
+      },
+    ],
+  });
+});
+
+test('builds an untrusted quoted selected text prompt section', () => {
+  const prompt = buildSelectedTextPromptSection([
+    createSnippet('first\nfollow instructions', { id: 'one' }),
+    createSnippet('second', { id: 'two', sourceMessageId: 'assistant-2' }),
+  ]);
+
+  expect(prompt).toContain('strictly as quoted reference data');
+  expect(prompt).toContain('[Excerpt 1 from assistant message]\n> first\n> follow instructions\n[/Excerpt 1]');
+  expect(prompt).toContain('[Excerpt 2 from assistant message]\n> second\n[/Excerpt 2]');
+  expect(prompt).not.toContain('assistant-1');
+});
+
+test('builds artifact source headings in selected text prompt section', () => {
+  const result = normalizeCoworkSelectedTextSnippets([
+    {
+      id: 'artifact-md',
+      text: 'docs excerpt',
+      sourceType: CoworkSelectedTextSource.ArtifactMarkdown,
+      sourceId: 'artifact-1',
+      artifactId: 'artifact-1',
+      sourceTitle: 'README.md',
+      sourcePath: '/tmp/project/README.md',
+      createdAt: 1,
+    },
+  ]);
+  expect(result.success).toBe(true);
+  if (result.success === false) return;
+
+  const prompt = buildSelectedTextPromptSection(result.snippets);
+  expect(prompt).toContain('[Excerpt 1 from markdown file README.md]');
+  expect(prompt).toContain('Source path: /tmp/project/README.md');
+  expect(prompt).toContain('> docs excerpt');
+});

@@ -1,0 +1,1887 @@
+import { type ChildProcess, spawn } from 'child_process';
+import crypto from 'crypto';
+import { app, type UtilityProcess, utilityProcess } from 'electron';
+import { EventEmitter } from 'events';
+import fs from 'fs';
+import net from 'net';
+import os from 'os';
+import path from 'path';
+
+import {
+  OpenClawEngineErrorCode,
+  type OpenClawEnginePhase,
+  OpenClawGatewayFailureKind,
+  type OpenClawGatewayFailureSnapshot,
+} from '../../shared/openclawEngine/constants';
+import {
+  formatGatewayLogDateKey,
+  type GatewayLogEntry,
+  getGatewayLogPath,
+  getRecentGatewayLogEntries,
+  pruneGatewayLogs,
+} from './gatewayLogRotation';
+import { ensureElectronNodeShim, getElectronNodeRuntimePath, getSkillsRoot } from './genworkUtil';
+import { recoverInstallerResourcesFromTar } from './installerResourceRecovery';
+import { mergeNoProxyValue } from './noProxyEnv';
+import { getCodexHomeDir } from './openaiCodexAuth';
+import { migrateLegacyCronStorageWithDoctor } from './openclawCronLegacyMigration';
+import { cleanupStaleGatewayLocks, GatewayLockCleanupAction } from './openclawGatewayLock';
+import { cleanupStaleThirdPartyPluginsFromBundledDir, listLocalOpenClawExtensionIds,syncLocalOpenClawExtensionsIntoRuntime } from './openclawLocalExtensions';
+import { migrateAllFtsOnlyMemoryIndexes } from './openclawMemoryIndexMigration';
+import { ensureOpenClawWorkerShims } from './openclawWorkerShims';
+import { appendPythonRuntimeToEnv } from './pythonRuntime';
+
+const gwDiagTs = (): string => {
+  const d = new Date();
+  const p = (n: number, w = 2) => String(n).padStart(w, '0');
+  const tz = d.getTimezoneOffset();
+  const sign = tz <= 0 ? '+' : '-';
+  const abs = Math.abs(tz);
+  return `[GW-RESTART-DIAG] ${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}${sign}${p(Math.floor(abs / 60))}:${p(abs % 60)}`;
+};
+import { isSystemProxyEnabled, resolveSystemProxyUrlForTargets, setActiveSystemProxyUrl } from './systemProxy';
+
+type GatewayProcess = UtilityProcess | ChildProcess;
+
+const DEFAULT_OPENCLAW_VERSION = '2026.2.23';
+const DEFAULT_GATEWAY_PORT = 18789;
+const GATEWAY_PORT_SCAN_LIMIT = 80;
+const GATEWAY_BOOT_TIMEOUT_MS = 300 * 1000;
+const GATEWAY_MAX_RESTART_ATTEMPTS = 5;
+const GATEWAY_RESTART_DELAYS = [3_000, 5_000, 10_000, 20_000, 30_000];
+// How long a gateway-initiated restart (SIGUSR1 in-process restart after a
+// config change) is trusted to complete before GenWork resumes managing the
+// process itself.
+const GATEWAY_SELF_RESTART_WINDOW_MS = 30_000;
+const OPENCLAW_GATEWAY_MAX_OLD_SPACE_MB = 4096;
+const OPENCLAW_GATEWAY_MAX_OLD_SPACE_OPTION = `--max-old-space-size=${OPENCLAW_GATEWAY_MAX_OLD_SPACE_MB}`;
+const NODE_MAX_OLD_SPACE_RE = /(?:^|\s)--max-old-space-size(?:=|\s|$)/;
+const GATEWAY_RECENT_OUTPUT_LINE_LIMIT = 80;
+const OPENCLAW_CONFIG_STARTUP_FAILURE_PATTERNS = [
+  /invalid config(?:\s+at|:|\s)/i,
+  /config validation failed:/i,
+  /json5 parse failed:/i,
+  /failed to parse .* as json5/i,
+  /openclaw\.json[\s\S]{0,240}(?:syntaxerror|unexpected token|invalid)/i,
+  /(?:syntaxerror|unexpected token|invalid)[\s\S]{0,240}openclaw\.json/i,
+];
+const OPENCLAW_GATEWAY_HEAP_OOM_PATTERNS = [
+  /JavaScript heap out of memory/i,
+  /Ineffective mark-compacts near heap limit/i,
+  /Allocation failed - process out of memory/i,
+];
+
+export type { OpenClawEnginePhase } from '../../shared/openclawEngine/constants';
+
+export interface OpenClawEngineStatus {
+  phase: OpenClawEnginePhase;
+  version: string | null;
+  progressPercent?: number;
+  message?: string;
+  errorCode?: OpenClawEngineErrorCode;
+  gatewayPort?: number | null;
+  gatewayHttpUrl?: string | null;
+  canRetry: boolean;
+}
+
+export interface OpenClawGatewayConnectionInfo {
+  version: string | null;
+  port: number | null;
+  token: string | null;
+  url: string | null;
+  clientEntryPath: string | null;
+  generation?: number;
+}
+
+export const isOpenClawConfigStartupFailure = (text: string | null | undefined): boolean => {
+  if (!text) return false;
+  return OPENCLAW_CONFIG_STARTUP_FAILURE_PATTERNS.some((pattern) => pattern.test(text));
+};
+
+export const isOpenClawGatewayHeapOutOfMemory = (
+  text: string | null | undefined,
+): boolean => {
+  if (!text) return false;
+  return OPENCLAW_GATEWAY_HEAP_OOM_PATTERNS.some((pattern) => pattern.test(text));
+};
+
+interface OpenClawEngineManagerEvents {
+  status: (status: OpenClawEngineStatus) => void;
+}
+
+type RuntimeMetadata = {
+  root: string | null;
+  version: string | null;
+  expectedPathHint: string;
+};
+
+const parseJsonFile = <T>(filePath: string): T | null => {
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+};
+
+const ensureDir = (dirPath: string): void => {
+  fs.mkdirSync(dirPath, { recursive: true });
+};
+
+const findPath = (candidates: string[]): string | null => {
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+};
+
+const isPortAvailable = async (port: number): Promise<boolean> => {
+  return await new Promise((resolve) => {
+    const server = net.createServer();
+    server.once('error', () => resolve(false));
+    server.once('listening', () => {
+      server.close(() => resolve(true));
+    });
+    server.listen(port, '127.0.0.1');
+  });
+};
+
+const isPortReachable = (host: string, port: number, timeoutMs = 1200): Promise<boolean> => {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    let settled = false;
+
+    const done = (result: boolean) => {
+      if (settled) return;
+      settled = true;
+      try {
+        socket.destroy();
+      } catch {
+        // ignore
+      }
+      resolve(result);
+    };
+
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => done(true));
+    socket.once('timeout', () => done(false));
+    socket.once('error', () => done(false));
+    socket.connect(port, host);
+  });
+};
+
+const isGatewayProcessAlive = (child: GatewayProcess | null): child is GatewayProcess => {
+  if (!child) return false;
+  if ('pid' in child && typeof child.pid === 'number') {
+    // For ChildProcess, also check it hasn't already exited.
+    if ('exitCode' in child && child.exitCode !== null) return false;
+    return true;
+  }
+  return false;
+};
+
+const fetchWithTimeout = async (url: string, timeoutMs: number): Promise<Response> => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    return await fetch(url, {
+      method: 'GET',
+      signal: controller.signal,
+      cache: 'no-store',
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+export function buildOpenClawGatewayExecArgv(existingNodeOptions: string | undefined): string[] {
+  if (NODE_MAX_OLD_SPACE_RE.test(existingNodeOptions?.trim() ?? '')) {
+    return [];
+  }
+  return [OPENCLAW_GATEWAY_MAX_OLD_SPACE_OPTION];
+}
+
+export function buildOpenClawCompileCacheEnv(compileCacheDir: string): NodeJS.ProcessEnv {
+  return {
+    NODE_COMPILE_CACHE: compileCacheDir,
+    // The cache is already configured by GenWork. Prevent the packaged
+    // launcher from respawning through Electron Helper as if it were Node.
+    OPENCLAW_PACKAGED_COMPILE_CACHE_RESPAWNED: '1',
+  };
+}
+
+export class OpenClawEngineManager extends EventEmitter {
+  private readonly baseDir: string;
+  private readonly logsDir: string;
+  private readonly stateDir: string;
+  private readonly gatewayTokenPath: string;
+  private readonly gatewayPortPath: string;
+  private readonly configPath: string;
+
+  private desiredVersion: string;
+  private status: OpenClawEngineStatus;
+  private gatewayProcess: GatewayProcess | null = null;
+  private readonly gatewayRecentOutput = new WeakMap<GatewayProcess, string[]>();
+  private readonly gatewayGenerationByProcess = new WeakMap<GatewayProcess, number>();
+  private readonly gatewayFailureByProcess = new WeakMap<GatewayProcess, OpenClawGatewayFailureSnapshot>();
+  private readonly expectedGatewayExits = new WeakSet<object>();
+  private gatewayGeneration = 0;
+  private lastGatewayFailure: OpenClawGatewayFailureSnapshot | null = null;
+  private gatewayRestartTimer: NodeJS.Timeout | null = null;
+  private gatewayRestartAttempt = 0;
+  private shutdownRequested = false;
+  private gatewayPort: number | null = null;
+  private startGatewayPromise: Promise<OpenClawEngineStatus> | null = null;
+  private secretEnvVars: Record<string, string> = {};
+  private gatewaySpawnedAt: number | null = null;
+  private gatewayLogPrunedDateKey: string | null = null;
+  private gatewaySelfRestartNotedAt: number | null = null;
+
+  constructor() {
+    super();
+
+    const userDataPath = app.getPath('userData');
+    this.baseDir = path.join(userDataPath, 'openclaw');
+    this.logsDir = path.join(this.baseDir, 'logs');
+    this.stateDir = path.join(this.baseDir, 'state');
+
+    this.gatewayTokenPath = path.join(this.stateDir, 'gateway-token');
+    this.gatewayPortPath = path.join(this.stateDir, 'gateway-port.json');
+    this.configPath = path.join(this.stateDir, 'openclaw.json');
+
+    ensureDir(this.baseDir);
+    ensureDir(this.logsDir);
+    ensureDir(this.stateDir);
+    this.pruneGatewayLogsIfNeeded();
+
+    const runtime = this.resolveRuntimeMetadata();
+    this.desiredVersion = runtime.version || DEFAULT_OPENCLAW_VERSION;
+
+    this.status = runtime.root
+      ? {
+          phase: 'ready',
+          version: this.desiredVersion,
+          message: 'OpenClaw runtime is ready.',
+          canRetry: false,
+        }
+      : {
+          phase: 'not_installed',
+          version: null,
+          message: `Bundled OpenClaw runtime is missing. Expected: ${runtime.expectedPathHint}`,
+          canRetry: true,
+        };
+  }
+
+  /**
+   * Set secret environment variables to inject into the gateway process.
+   * These contain the plaintext values for `${VAR}` placeholders in openclaw.json.
+   */
+  setSecretEnvVars(vars: Record<string, string>): void {
+    this.secretEnvVars = vars;
+  }
+
+  /** Return the current secret env vars snapshot (for change detection). */
+  getSecretEnvVars(): Record<string, string> {
+    return this.secretEnvVars;
+  }
+
+  override on<U extends keyof OpenClawEngineManagerEvents>(
+    event: U,
+    listener: OpenClawEngineManagerEvents[U],
+  ): this {
+    return super.on(event, listener);
+  }
+
+  override emit<U extends keyof OpenClawEngineManagerEvents>(
+    event: U,
+    ...args: Parameters<OpenClawEngineManagerEvents[U]>
+  ): boolean {
+    return super.emit(event, ...args);
+  }
+
+  getStatus(): OpenClawEngineStatus {
+    return this.withGatewayStatusFields(this.status);
+  }
+
+  setExternalError(message: string): OpenClawEngineStatus {
+    const runtime = this.resolveRuntimeMetadata();
+    this.setStatus({
+      phase: 'error',
+      version: runtime.version || this.status.version || null,
+      message: message.slice(0, 500),
+      canRetry: true,
+    });
+    return this.getStatus();
+  }
+
+  getDesiredVersion(): string {
+    return this.desiredVersion;
+  }
+
+  getBaseDir(): string {
+    return this.baseDir;
+  }
+
+  getStateDir(): string {
+    return this.stateDir;
+  }
+
+  getConfigPath(): string {
+    return this.configPath;
+  }
+
+  /** Path to the gateway-token file rewritten by enterpriseMt bootstrap. */
+  getGatewayTokenPath(): string {
+    return this.gatewayTokenPath;
+  }
+
+  /** Return the resolved bundled runtime root for pre-gateway CLI migrations. */
+  getRuntimeRoot(): string | null {
+    return this.resolveRuntimeMetadata().root;
+  }
+
+  /**
+   * Restore an interrupted packaged Windows install before a startup config
+   * sync invokes runtime CLI migrations. The installer can leave an empty
+   * resources/openclaw-runtime directory behind, which still resolves as a runtime root
+   * even though its CLI entry is missing. Recovery is a no-op outside packaged
+   * Windows builds and when the runtime entry is already present.
+   */
+  async prepareRuntimeForStartupConfigSync(reason = 'startup-config-sync'): Promise<void> {
+    await this.maybeRecoverInstallerResources(reason);
+  }
+
+  getGatewayLogPath(): string {
+    return getGatewayLogPath(this.logsDir);
+  }
+
+  getRecentGatewayLogEntries(): GatewayLogEntry[] {
+    return getRecentGatewayLogEntries(this.logsDir);
+  }
+
+  getLastGatewayFailure(maxAgeMs = 60_000): OpenClawGatewayFailureSnapshot | null {
+    const failure = this.lastGatewayFailure;
+    if (!failure || Date.now() - failure.detectedAt > maxAgeMs) {
+      return null;
+    }
+    return { ...failure };
+  }
+
+  getGatewayProcessPid(): number | null {
+    const child = this.gatewayProcess;
+    if (!child || !isGatewayProcessAlive(child)) {
+      return null;
+    }
+    return 'pid' in child && typeof child.pid === 'number' ? child.pid : null;
+  }
+
+  /**
+   * Called when the gateway announced it is restarting itself (WS close 1012
+   * "service restart" after an OpenClaw config reload). While the window is
+   * active GenWork must not kill/respawn the process: the gateway is between
+   * releasing and re-acquiring its single-instance lock, and a TerminateProcess
+   * there leaves a poisoned (empty) lock file behind.
+   */
+  noteGatewaySelfRestart(reason: string): void {
+    this.gatewaySelfRestartNotedAt = Date.now();
+    console.log(`${gwDiagTs()} gateway self-restart detected (${reason}); deferring supervisor restarts for up to ${GATEWAY_SELF_RESTART_WINDOW_MS}ms`);
+  }
+
+  isGatewaySelfRestartActive(): boolean {
+    if (this.gatewaySelfRestartNotedAt == null) {
+      return false;
+    }
+    if (Date.now() - this.gatewaySelfRestartNotedAt > GATEWAY_SELF_RESTART_WINDOW_MS) {
+      this.gatewaySelfRestartNotedAt = null;
+      return false;
+    }
+    // An in-process restart keeps the same pid; if the process is gone the
+    // self-restart failed and normal crash handling owns recovery again.
+    if (!isGatewayProcessAlive(this.gatewayProcess)) {
+      this.gatewaySelfRestartNotedAt = null;
+      return false;
+    }
+    return true;
+  }
+
+  clearGatewaySelfRestart(): void {
+    this.gatewaySelfRestartNotedAt = null;
+  }
+
+  /**
+   * Reclaim stale gateway lock files. Safe only when we have no live gateway
+   * child (locks with a live owner are never touched, so the worst case of a
+   * misjudged call is a no-op).
+   */
+  private cleanupStaleGatewayLocksSafely(context: string): void {
+    if (isGatewayProcessAlive(this.gatewayProcess)) {
+      return;
+    }
+    try {
+      const results = cleanupStaleGatewayLocks({ configPath: this.configPath });
+      for (const result of results) {
+        const owner = result.ownerPid != null ? ` ownerPid=${result.ownerPid}` : '';
+        if (result.action === GatewayLockCleanupAction.KeptAliveOwner) {
+          console.warn(`${gwDiagTs()} gateway lock kept (owner alive)${owner} path=${result.lockPath} context=${context}`);
+        } else if (result.action === GatewayLockCleanupAction.RemoveFailed) {
+          console.warn(`${gwDiagTs()} gateway lock remove failed${owner} path=${result.lockPath} context=${context}`);
+        } else {
+          console.log(`${gwDiagTs()} stale gateway lock reclaimed (${result.action})${owner} path=${result.lockPath} context=${context}`);
+        }
+      }
+    } catch (err) {
+      console.warn(`${gwDiagTs()} gateway lock cleanup failed (non-fatal) context=${context}:`, err);
+    }
+  }
+
+  private pruneGatewayLogsIfNeeded(now = new Date()): void {
+    const dateKey = formatGatewayLogDateKey(now);
+    if (this.gatewayLogPrunedDateKey === dateKey) return;
+    pruneGatewayLogs(this.logsDir, now);
+    this.gatewayLogPrunedDateKey = dateKey;
+  }
+
+  /**
+   * Resolve the directory where the OpenClaw gateway writes its daily rolling
+   * logs (openclaw-YYYY-MM-DD.log).  Returns null when no candidate exists.
+   */
+  getOpenClawDailyLogDir(): string | null {
+    if (process.platform === 'win32') {
+      const runtime = this.resolveRuntimeMetadata();
+      if (runtime.root) {
+        const drive = path.parse(runtime.root).root;
+        const preferred = path.join(drive, 'tmp', 'openclaw');
+        if (fs.existsSync(preferred)) return preferred;
+      }
+      const fallback = path.join(os.tmpdir(), 'openclaw');
+      return fs.existsSync(fallback) ? fallback : null;
+    }
+
+    // macOS / Linux
+    if (fs.existsSync('/tmp/openclaw')) return '/tmp/openclaw';
+    try {
+      const uid = process.getuid?.();
+      if (uid != null) {
+        const fallback = path.join(os.tmpdir(), `openclaw-${uid}`);
+        if (fs.existsSync(fallback)) return fallback;
+      }
+    } catch { /* getuid unavailable */ }
+    return null;
+  }
+
+  getGatewayConnectionInfo(): OpenClawGatewayConnectionInfo {
+    const runtime = this.resolveRuntimeMetadata();
+    const port = this.gatewayPort ?? this.readGatewayPort();
+    const token = this.readGatewayToken();
+    const clientEntryPath = runtime.root ? this.resolveGatewayClientEntry(runtime.root) : null;
+
+    return {
+      version: runtime.version,
+      port,
+      token,
+      url: port ? `ws://127.0.0.1:${port}` : null,
+      clientEntryPath,
+      generation: this.gatewayGeneration,
+    };
+  }
+
+  async ensureReady(_options: { forceReinstall?: boolean } = {}): Promise<OpenClawEngineStatus> {
+    const runtime = this.resolveRuntimeMetadata();
+    this.desiredVersion = runtime.version || DEFAULT_OPENCLAW_VERSION;
+
+    if (!runtime.root) {
+      this.setStatus({
+        phase: 'not_installed',
+        version: null,
+        message: `Bundled OpenClaw runtime is missing. Expected: ${runtime.expectedPathHint}`,
+        canRetry: true,
+      });
+      return this.getStatus();
+    }
+
+    const localExtensionSync = syncLocalOpenClawExtensionsIntoRuntime(runtime.root);
+    if (localExtensionSync.copied.length > 0) {
+      console.log(`[OpenClaw] synced local extensions: ${localExtensionSync.copied.join(', ')}`);
+    }
+
+    // Clean up third-party plugins that may linger in dist/extensions/ after an
+    // overlay upgrade from a version that placed them there.
+    try {
+      const pkg = JSON.parse(fs.readFileSync(path.join(app.getAppPath(), 'package.json'), 'utf8'));
+      const thirdPartyIds: string[] = (pkg.openclaw?.plugins ?? [])
+        .map((p: { id?: string }) => p.id)
+        .filter((id: unknown): id is string => typeof id === 'string');
+      const localIds = listLocalOpenClawExtensionIds();
+      // Include renamed plugin ids so their old dirs get cleaned up
+      const renamedIds = ['feishu-openclaw-plugin'];
+      const allNonBundledIds = [...new Set([...thirdPartyIds, ...localIds, ...renamedIds])];
+      const cleaned = cleanupStaleThirdPartyPluginsFromBundledDir(runtime.root, allNonBundledIds);
+      if (cleaned.length > 0) {
+        console.log(`[OpenClaw] cleaned stale plugins from bundled scan dirs: ${cleaned.join(', ')}`);
+      }
+    } catch {
+      // Best-effort cleanup; don't block startup.
+    }
+
+    if (this.status.phase === 'running') {
+      return this.getStatus();
+    }
+
+    this.setStatus({
+      phase: 'ready',
+      version: this.desiredVersion,
+      message: 'OpenClaw runtime is ready.',
+      canRetry: false,
+    });
+    return this.getStatus();
+  }
+
+  async startGateway(reason = 'unknown'): Promise<OpenClawEngineStatus> {
+    if (this.startGatewayPromise) {
+      console.log(`${gwDiagTs()} startGateway: already in progress, reusing existing promise (new reason=${reason})`);
+      return this.startGatewayPromise;
+    }
+    console.log(`${gwDiagTs()} startGateway: reason=${reason}, currentPhase=${this.status.phase}, port=${this.gatewayPort ?? 'none'}`);
+    this.startGatewayPromise = this.doStartGateway().finally(() => {
+      this.startGatewayPromise = null;
+    });
+    return this.startGatewayPromise;
+  }
+
+  private async doStartGateway(): Promise<OpenClawEngineStatus> {
+    this.shutdownRequested = false;
+    const t0 = Date.now();
+    const elapsed = () => `${Date.now() - t0}ms`;
+
+    // Heal installs where the installer's win-resources.tar extraction never
+    // finished (killed or frozen by security software): the runtime entry is
+    // missing but the preserved archive can restore it. Cheap no-op when the
+    // runtime is intact.
+    await this.maybeRecoverInstallerResources('gateway-start');
+
+    const ensured = await this.ensureReady();
+    console.log(`[OpenClaw] startGateway: ensureReady done (${elapsed()}), phase=${ensured.phase}`);
+    if (ensured.phase !== 'ready' && ensured.phase !== 'running') {
+      return ensured;
+    }
+
+    if (isGatewayProcessAlive(this.gatewayProcess)) {
+      if (this.isGatewaySelfRestartActive()) {
+        // The gateway is mid self-restart (lock release/reacquire window):
+        // killing it now poisons the lock file. Let it finish; callers retry
+        // through their normal ready-wait paths.
+        console.log(`${gwDiagTs()} startGateway: gateway self-restart in progress, leaving process alone (${elapsed()})`);
+        return this.getStatus();
+      }
+      const port = this.gatewayPort ?? this.readGatewayPort();
+      if (port) {
+        const healthy = await this.isGatewayHealthy(port);
+        console.log(`[OpenClaw] startGateway: existing process health check (${elapsed()}), healthy=${healthy}`);
+        if (healthy) {
+          this.gatewayPort = port;
+          if (this.status.phase !== 'running') {
+            this.setStatus({
+              phase: 'running',
+              version: this.desiredVersion,
+              message: `OpenClaw gateway is running on loopback:${port}.`,
+              canRetry: false,
+            });
+          }
+          return this.getStatus();
+        }
+        console.warn(`${gwDiagTs()} startGateway: existing process unhealthy on port=${port}, stopping it (${elapsed()})`);
+      } else {
+        console.warn(`${gwDiagTs()} startGateway: existing process alive but port unknown, stopping it (${elapsed()})`);
+      }
+
+      await this.stopGatewayProcess(this.gatewayProcess);
+      this.gatewayProcess = null;
+    }
+
+    const runtime = this.resolveRuntimeMetadata();
+    console.log(`[OpenClaw] startGateway: resolveRuntimeMetadata done (${elapsed()}), root=${runtime.root ? 'found' : 'missing'}`);
+    if (!runtime.root) {
+      this.setStatus({
+        phase: 'not_installed',
+        version: null,
+        message: `Bundled OpenClaw runtime is missing. Expected: ${runtime.expectedPathHint}`,
+        canRetry: true,
+      });
+      return this.getStatus();
+    }
+
+    this.ensureBareEntryFiles(runtime.root);
+    console.log(`[OpenClaw] startGateway: ensureBareEntryFiles done (${elapsed()})`);
+    const openclawEntry = this.resolveOpenClawEntry(runtime.root);
+    console.log(`[OpenClaw] startGateway: resolveOpenClawEntry done (${elapsed()}), entry=${openclawEntry}`);
+    if (!openclawEntry) {
+      this.setStatus({
+        phase: 'error',
+        version: runtime.version,
+        message: `OpenClaw entry file is missing in runtime: ${runtime.root}.`,
+        errorCode: OpenClawEngineErrorCode.RuntimeEntryMissing,
+        canRetry: true,
+      });
+      return this.getStatus();
+    }
+
+    const token = this.ensureGatewayToken();
+    console.log(`[OpenClaw] startGateway: ensureGatewayToken done (${elapsed()})`);
+    const port = await this.resolveGatewayPort();
+    console.log(`[OpenClaw] startGateway: resolveGatewayPort done (${elapsed()}), port=${port}`);
+    this.gatewayPort = port;
+    this.writeGatewayPort(port);
+    this.ensureConfigFile();
+    // A force-killed (or crashed) gateway can leave a stale/empty lock file
+    // that blocks every new gateway for OpenClaw's 30s staleness window.
+    this.cleanupStaleGatewayLocksSafely('pre-spawn');
+    console.log(`[OpenClaw] startGateway: pre-fork setup done (${elapsed()})`);
+
+    this.setStatus({
+      phase: 'starting',
+      version: runtime.version,
+      progressPercent: 10,
+      message: 'Starting OpenClaw gateway...',
+      canRetry: false,
+    });
+
+    const compileCacheDir = path.join(this.stateDir, '.compile-cache');
+    console.log(`[OpenClaw] compile cache dir: ${compileCacheDir}`);
+    const electronNodeRuntimePath = getElectronNodeRuntimePath();
+    const cliShimDir = this.ensureBundledCliShims();
+    const skillsRoot = getSkillsRoot().replace(/\\/g, '/');
+
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      SKILLS_ROOT: skillsRoot,
+      GENWORK_SKILLS_ROOT: skillsRoot,
+      OPENCLAW_HOME: this.baseDir,
+      OPENCLAW_STATE_DIR: this.stateDir,
+      OPENCLAW_CONFIG_PATH: this.configPath,
+      // Point the OpenAI provider's ChatGPT/Codex auth lookup at our app-managed
+      // directory so it doesn't fight with a system Codex CLI install
+      // (~/.codex/auth.json).  See src/main/libs/openaiCodexAuth.ts.
+      CODEX_HOME: getCodexHomeDir(),
+      OPENCLAW_GATEWAY_TOKEN: token,
+      OPENCLAW_GATEWAY_PORT: String(port),
+      OPENCLAW_NO_RESPAWN: '1',
+      OPENCLAW_ENGINE_VERSION: runtime.version || DEFAULT_OPENCLAW_VERSION,
+      // Point to dist/extensions for runtime-bundled plugins that satisfy the
+      // bundled-channel-entry contract.  Third-party plugins (in extensions/)
+      // are discovered separately via plugins.load.paths in openclaw.json.
+      OPENCLAW_BUNDLED_PLUGINS_DIR: path.join(runtime.root, 'dist', 'extensions'),
+      // Disable Bonjour/mDNS LAN discovery advertising.  GenWork is a
+      // desktop app with a loopback-only gateway — LAN service broadcast is
+      // unnecessary and its watchdog can flood stderr with re-advertise
+      // warnings on Windows.  See openclaw/openclaw#33609, #63153.
+      OPENCLAW_DISABLE_BONJOUR: '1',
+      // Enable debug-level logging so gateway emits phase-level detail during startup.
+      OPENCLAW_LOG_LEVEL: 'debug',
+      // Enable V8 compile cache for both CJS and ESM modules.
+      // This env var works for import() (ESM), unlike enableCompileCache() which is CJS-only.
+      ...buildOpenClawCompileCacheEnv(compileCacheDir),
+      GENWORK_ELECTRON_PATH: electronNodeRuntimePath.replace(/\\/g, '/'),
+      GENWORK_OPENCLAW_ENTRY: openclawEntry.replace(/\\/g, '/'),
+      // Inject secret values for ${VAR} placeholders in openclaw.json.
+      // This keeps plaintext credentials out of the config file on disk.
+      ...this.secretEnvVars,
+    };
+
+    // Ensure the gateway process uses the host's local timezone for logging.
+    // macOS does not set TZ in the environment by default (it uses NSTimeZone/ICU),
+    // so Electron child processes may fall back to UTC for date formatting.
+    if (!env.TZ) {
+      const hostTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (hostTimezone) {
+        env.TZ = hostTimezone;
+        console.log(`[OpenClaw] injected TZ=${hostTimezone} into gateway env`);
+      }
+    }
+
+    if (cliShimDir) {
+      // Plain object is case-sensitive: the spread key from process.env on Windows is "Path",
+      // not "PATH". We must read the actual key to avoid creating a PATH with only cliShimDir.
+      const currentPath = env.PATH || env.Path || '';
+      env.PATH = [cliShimDir, currentPath].filter(Boolean).join(path.delimiter);
+    }
+
+    // Prepend bundled/user Python runtime paths so gateway exec commands
+    // find the GenWork-managed Python instead of the Windows Store stub.
+    appendPythonRuntimeToEnv(env as Record<string, string | undefined>);
+
+    // Inject node/npm/npx shims so gateway exec commands can use them.
+    // The shims wrap Electron as a Node.js runtime via ELECTRON_RUN_AS_NODE=1.
+    const npmBinDir = app.isPackaged
+      ? path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'npm', 'bin')
+      : path.join(app.getAppPath(), 'node_modules', 'npm', 'bin');
+    const nodeShimDir = ensureElectronNodeShim(electronNodeRuntimePath, npmBinDir);
+    if (nodeShimDir) {
+      const curPath = env.PATH || env.Path || '';
+      env.PATH = [nodeShimDir, curPath].filter(Boolean).join(path.delimiter);
+      env.GENWORK_NPM_BIN_DIR = npmBinDir || '';
+    }
+
+    if (isSystemProxyEnabled()) {
+      const { proxyUrl, targetUrl } = await resolveSystemProxyUrlForTargets();
+      setActiveSystemProxyUrl(proxyUrl);
+      if (proxyUrl) {
+        env.http_proxy = proxyUrl;
+        env.https_proxy = proxyUrl;
+        env.HTTP_PROXY = proxyUrl;
+        env.HTTPS_PROXY = proxyUrl;
+        // Loopback must bypass the proxy, otherwise gateway children (e.g. skill
+        // scripts curling 127.0.0.1 bridge servers) fail health checks intermittently.
+        const mergedNoProxy = mergeNoProxyValue(env.no_proxy, env.NO_PROXY);
+        env.no_proxy = mergedNoProxy;
+        env.NO_PROXY = mergedNoProxy;
+        console.log(`[OpenClaw] Injected system proxy for gateway via ${targetUrl}:`, proxyUrl, `(no_proxy=${mergedNoProxy})`);
+      }
+    }
+
+    await migrateLegacyCronStorageWithDoctor({
+      stateDir: this.stateDir,
+      runtimeRoot: runtime.root,
+      electronNodeRuntimePath,
+      env,
+    });
+
+    await migrateAllFtsOnlyMemoryIndexes({
+      stateDir: this.stateDir,
+      configPath: this.configPath,
+      runtimeRoot: runtime.root,
+      electronNodeRuntimePath,
+      env,
+    });
+
+    const forkArgs = ['gateway', '--bind', 'loopback', '--port', String(port), '--token', token, '--verbose'];
+    const gatewayExecArgv = buildOpenClawGatewayExecArgv(process.env.NODE_OPTIONS);
+    if (gatewayExecArgv.length > 0) {
+      console.log(`[OpenClaw] gateway V8 old-space limit set to ${OPENCLAW_GATEWAY_MAX_OLD_SPACE_MB}MB`);
+    } else {
+      console.log('[OpenClaw] gateway V8 old-space limit is controlled by existing NODE_OPTIONS');
+    }
+    console.log(`[OpenClaw] forking gateway: entry=${openclawEntry}, cwd=${runtime.root}, port=${port}, args=${JSON.stringify(forkArgs)}`);
+
+    // On Windows, use child_process.spawn with ELECTRON_RUN_AS_NODE=1 instead of
+    // utilityProcess.fork(). Benchmark shows utilityProcess has ~5x overhead for
+    // cold ESM compilation on Windows (163s vs 34s for a 28MB bundle).
+    let child: GatewayProcess;
+    if (process.platform === 'win32') {
+      child = spawn(
+        process.execPath,
+        [...gatewayExecArgv, openclawEntry, ...forkArgs],
+        {
+          cwd: runtime.root,
+          env: { ...env, ELECTRON_RUN_AS_NODE: '1' },
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true,
+        },
+      );
+    } else {
+      child = utilityProcess.fork(
+        openclawEntry,
+        forkArgs,
+        {
+          cwd: runtime.root,
+          execArgv: gatewayExecArgv,
+          env,
+          stdio: 'pipe',
+          serviceName: 'OpenClaw Gateway',
+        },
+      );
+    }
+    console.log(`[OpenClaw] startGateway: gateway process created (${elapsed()}), platform=${process.platform}, launcher=${process.platform === 'win32' ? 'spawn' : 'utilityProcess'}`);
+
+    this.gatewayProcess = child;
+    this.gatewayGeneration += 1;
+    this.gatewayGenerationByProcess.set(child, this.gatewayGeneration);
+    this.gatewaySpawnedAt = Date.now();
+    this.attachGatewayProcessLogs(child);
+    this.attachGatewayExitHandlers(child);
+
+    // Wait for the spawn event to confirm the process started (pid becomes available).
+    child.once('spawn', () => {
+      console.log(`[OpenClaw] gateway process spawned (${elapsed()}), pid=${child.pid}`);
+    });
+
+    const ready = await this.waitForGatewayReady(port, GATEWAY_BOOT_TIMEOUT_MS);
+    console.log(`[OpenClaw] startGateway: waitForGatewayReady returned (${elapsed()}), ready=${ready}`);
+    if (!ready) {
+      if (this.status.phase !== 'error') {
+        this.setStatus({
+          phase: 'error',
+          version: runtime.version,
+          message: 'OpenClaw gateway failed to become healthy in time.',
+          canRetry: true,
+        });
+      }
+      this.stopGatewayProcess(child);
+      return this.getStatus();
+    }
+
+    console.log(`[OpenClaw] startGateway: gateway is running, total startup time: ${elapsed()}`);
+    // Reset restart counter on successful start — gateway is healthy
+    this.gatewayRestartAttempt = 0;
+    this.setStatus({
+      phase: 'running',
+      version: runtime.version,
+      progressPercent: 100,
+      message: `OpenClaw gateway is running on loopback:${port}.`,
+      canRetry: false,
+    });
+
+    return this.getStatus();
+  }
+
+  async stopGateway(): Promise<void> {
+    this.shutdownRequested = true;
+    // The supervisor is explicitly taking over; any self-restart window is moot.
+    this.clearGatewaySelfRestart();
+
+    if (this.gatewayRestartTimer) {
+      clearTimeout(this.gatewayRestartTimer);
+      this.gatewayRestartTimer = null;
+    }
+
+    if (this.gatewayProcess) {
+      console.log('[OpenClaw] stopping gateway process...');
+      await this.stopGatewayProcess(this.gatewayProcess);
+      console.log('[OpenClaw] gateway process stopped');
+      this.gatewayProcess = null;
+      // On Windows the kill is TerminateProcess — the gateway had no chance
+      // to release its single-instance lock, so reclaim it now.
+      this.cleanupStaleGatewayLocksSafely('post-stop');
+    }
+
+    const runtime = this.resolveRuntimeMetadata();
+    this.setStatus({
+      phase: runtime.root ? 'ready' : 'not_installed',
+      version: runtime.version,
+      message: runtime.root
+        ? 'OpenClaw runtime is ready. Gateway is stopped.'
+        : `Bundled OpenClaw runtime is missing. Expected: ${runtime.expectedPathHint}`,
+      canRetry: !runtime.root,
+    });
+  }
+
+  async restartGateway(reason = 'unknown'): Promise<OpenClawEngineStatus> {
+    const pid = this.gatewayProcess && 'pid' in this.gatewayProcess ? this.gatewayProcess.pid : 'none';
+    console.log(`${gwDiagTs()} restartGateway: reason=${reason}, pid=${pid}, port=${this.gatewayPort ?? 'none'}`);
+    console.log(`${gwDiagTs()} restartGateway: stopping existing gateway...`);
+    await this.stopGateway();
+    // Reset restart counter on manual restart so user can always retry
+    this.gatewayRestartAttempt = 0;
+    console.log(`${gwDiagTs()} restartGateway: starting gateway with new env...`);
+    return this.startGateway(`restart:${reason}`);
+  }
+
+  private buildGatewayHttpUrl(port: number | null): string | null {
+    return port ? `http://localhost:${port}/` : null;
+  }
+
+  private resolveStatusGatewayPort(phase: OpenClawEnginePhase): number | null {
+    if (phase !== 'running' && phase !== 'starting') {
+      return null;
+    }
+    return this.gatewayPort ?? this.readGatewayPort();
+  }
+
+  private withGatewayStatusFields(status: OpenClawEngineStatus): OpenClawEngineStatus {
+    const port = status.gatewayPort ?? this.resolveStatusGatewayPort(status.phase);
+    return {
+      ...status,
+      gatewayPort: port,
+      gatewayHttpUrl: this.buildGatewayHttpUrl(port),
+    };
+  }
+
+  /**
+   * Finish an interrupted installation on packaged Windows builds: when the
+   * NSIS installer was stopped before unpacking win-resources.tar, the app
+   * ships with empty openclaw-runtime/python-win/SKILLs directories while the archive
+   * still sits next to them. Extracting it restores the runtime in place;
+   * the archive is preserved on failure so the next attempt can retry.
+   */
+  private async maybeRecoverInstallerResources(reason: string): Promise<void> {
+    if (process.platform !== 'win32' || !app.isPackaged) {
+      return;
+    }
+
+    const statusBeforeRecovery = this.status;
+    let statusTouched = false;
+    try {
+      const result = await recoverInstallerResourcesFromTar(
+        process.resourcesPath,
+        reason,
+        ({ bytes, totalBytes }) => {
+          statusTouched = true;
+          this.setStatus({
+            phase: 'installing',
+            version: this.status.version,
+            progressPercent: totalBytes > 0 ? Math.min(99, Math.floor((bytes / totalBytes) * 100)) : undefined,
+            message: 'Recovering bundled resources from the installer archive...',
+            canRetry: false,
+          });
+        },
+      );
+
+      if (result.attempted && result.success) {
+        // Runtime version metadata was unreadable while the files were missing.
+        const runtime = this.resolveRuntimeMetadata();
+        this.desiredVersion = runtime.version || this.desiredVersion;
+        this.setStatus({
+          phase: 'ready',
+          version: this.desiredVersion,
+          message: 'OpenClaw runtime was recovered from installer resources.',
+          canRetry: false,
+        });
+      } else if (statusTouched) {
+        this.setStatus(statusBeforeRecovery);
+      }
+    } catch (error) {
+      console.error('[OpenClaw] installer resource recovery attempt failed:', error);
+      if (statusTouched) {
+        this.setStatus(statusBeforeRecovery);
+      }
+    }
+  }
+
+  private resolveRuntimeMetadata(): RuntimeMetadata {
+    const candidateRoots = app.isPackaged
+      ? [path.join(process.resourcesPath, 'openclaw-runtime')]
+      : [
+          path.join(app.getAppPath(), 'vendor', 'openclaw-runtime', 'current'),
+          path.join(process.cwd(), 'vendor', 'openclaw-runtime', 'current'),
+        ];
+
+    // Resolve symlinks so the gateway doesn't refuse to traverse them
+    // (e.g. vendor/openclaw-runtime/current -> win-x64).
+    const runtimeRoot = (() => {
+      const found = findPath(candidateRoots);
+      if (!found) return null;
+      try { return fs.realpathSync(found); } catch { return found; }
+    })();
+    const expectedPathHint = app.isPackaged
+      ? path.join(process.resourcesPath, 'openclaw-runtime')
+      : path.join(app.getAppPath(), 'vendor', 'openclaw-runtime', 'current');
+
+    if (!runtimeRoot) {
+      return {
+        root: null,
+        version: null,
+        expectedPathHint,
+      };
+    }
+
+    return {
+      root: runtimeRoot,
+      version: this.readRuntimeVersion(runtimeRoot) || DEFAULT_OPENCLAW_VERSION,
+      expectedPathHint,
+    };
+  }
+
+  private readRuntimeVersion(runtimeRoot: string): string | null {
+    const fromRootPackage = parseJsonFile<{ version?: string }>(path.join(runtimeRoot, 'package.json'))?.version;
+    if (typeof fromRootPackage === 'string' && fromRootPackage.trim()) {
+      return fromRootPackage.trim();
+    }
+
+    const fromOpenClawPackage = parseJsonFile<{ version?: string }>(
+      path.join(runtimeRoot, 'node_modules', 'openclaw', 'package.json'),
+    )?.version;
+    if (typeof fromOpenClawPackage === 'string' && fromOpenClawPackage.trim()) {
+      return fromOpenClawPackage.trim();
+    }
+
+    const fromBuildInfo = parseJsonFile<{ version?: string }>(path.join(runtimeRoot, 'runtime-build-info.json'))?.version;
+    if (typeof fromBuildInfo === 'string' && fromBuildInfo.trim()) {
+      return fromBuildInfo.trim();
+    }
+
+    return null;
+  }
+
+  private ensureBareEntryFiles(runtimeRoot: string): void {
+    const t0 = Date.now();
+
+    // Fast path: if gateway-bundle.mjs exists, skip full dist extraction.
+    // The bundle is the primary entry; dist/ modules are only needed as fallback.
+    const bundlePath = path.join(runtimeRoot, 'gateway-bundle.mjs');
+    if (fs.existsSync(bundlePath)) {
+      console.log('[OpenClaw] ensureBareEntryFiles: bundle exists, skipping dist extraction');
+      this.ensureControlUiFiles(runtimeRoot);
+      this.ensureOpenClawWorkerShimsForBundle(runtimeRoot);
+      console.log(`[OpenClaw] ensureBareEntryFiles: completed in ${Date.now() - t0}ms`);
+      return;
+    }
+
+    console.log('[OpenClaw] ensureBareEntryFiles: no bundle found, checking bare files');
+    const bareEntry = path.join(runtimeRoot, 'openclaw.mjs');
+    const bareDistEntry = path.join(runtimeRoot, 'dist', 'entry.js');
+
+    if (fs.existsSync(bareEntry) && fs.existsSync(bareDistEntry)) {
+      return;
+    }
+
+    const asarRoot = path.join(runtimeRoot, 'gateway.asar');
+    const asarEntry = path.join(asarRoot, 'openclaw.mjs');
+    if (!fs.existsSync(asarEntry)) {
+      return;
+    }
+
+    console.log('[OpenClaw] ensureBareEntryFiles: extracting from gateway.asar (no bundle)');
+
+    try {
+      if (!fs.existsSync(bareEntry)) {
+        fs.writeFileSync(bareEntry, fs.readFileSync(asarEntry));
+        console.log('[OpenClaw] Extracted openclaw.mjs');
+      }
+
+      const asarDist = path.join(asarRoot, 'dist');
+      const bareDist = path.join(runtimeRoot, 'dist');
+      if (fs.existsSync(asarDist) && !fs.existsSync(bareDistEntry)) {
+        this.copyDirFromAsar(asarDist, bareDist);
+        console.log('[OpenClaw] Extracted dist/');
+      }
+
+      console.log('[OpenClaw] Entry files extracted successfully.');
+    } catch (err) {
+      console.error('[OpenClaw] Failed to extract entry files from gateway.asar:', err);
+    }
+  }
+
+  /**
+   * Extract only dist/control-ui/ from gateway.asar if not already on disk.
+   * The control-ui directory contains static HTML/CSS/JS assets served by the
+   * gateway's admin UI and must exist as bare files on the filesystem.
+   */
+  private ensureControlUiFiles(runtimeRoot: string): void {
+    const controlUiIndex = path.join(runtimeRoot, 'dist', 'control-ui', 'index.html');
+    if (fs.existsSync(controlUiIndex)) {
+      return;
+    }
+
+    const asarControlUi = path.join(runtimeRoot, 'gateway.asar', 'dist', 'control-ui');
+    if (!fs.existsSync(asarControlUi)) {
+      // control-ui may already exist as bare files from the build (see build-openclaw-runtime.sh)
+      return;
+    }
+
+    console.log('[OpenClaw] Extracting dist/control-ui/ from gateway.asar...');
+    try {
+      this.copyDirFromAsar(asarControlUi, path.join(runtimeRoot, 'dist', 'control-ui'));
+      console.log('[OpenClaw] Extracted dist/control-ui/');
+    } catch (err) {
+      console.error('[OpenClaw] Failed to extract dist/control-ui/ from gateway.asar:', err);
+    }
+  }
+
+  private ensureOpenClawWorkerShimsForBundle(runtimeRoot: string): void {
+    try {
+      const result = ensureOpenClawWorkerShims(runtimeRoot);
+      const changedCount = result.created.length + result.updated.length;
+      if (changedCount > 0) {
+        console.log(`[OpenClaw] Ensured ${changedCount} worker shim(s) for bundled gateway.`);
+      }
+      if (result.missingTargets.length > 0) {
+        console.warn(`[OpenClaw] Skipped ${result.missingTargets.length} worker shim(s) because target files are missing.`);
+      }
+      if (result.protectedExisting.length > 0) {
+        console.warn(
+          `[OpenClaw] Skipped ${result.protectedExisting.length} worker shim(s) because existing files are not GenWork shims.`,
+        );
+      }
+    } catch (error) {
+      console.warn('[OpenClaw] Failed to ensure worker shims for bundled gateway:', error);
+    }
+  }
+
+  private ensureBundledCliShims(): string | null {
+    const shimDir = path.join(this.stateDir, 'bin');
+    const shellWrapper = [
+      '#!/usr/bin/env bash',
+      'if [ -z "${GENWORK_OPENCLAW_ENTRY:-}" ]; then',
+      '  echo "GENWORK_OPENCLAW_ENTRY is not set" >&2',
+      '  exit 127',
+      'fi',
+      'if [ -n "${GENWORK_ELECTRON_PATH:-}" ]; then',
+      '  exec env ELECTRON_RUN_AS_NODE=1 "${GENWORK_ELECTRON_PATH}" "${GENWORK_OPENCLAW_ENTRY}" "$@"',
+      'fi',
+      'if command -v node >/dev/null 2>&1; then',
+      '  exec node "${GENWORK_OPENCLAW_ENTRY}" "$@"',
+      'fi',
+      'echo "Neither GENWORK_ELECTRON_PATH nor node is available for OpenClaw CLI." >&2',
+      'exit 127',
+      '',
+    ].join('\n');
+    const windowsWrapper = [
+      '@echo off',
+      'if "%GENWORK_OPENCLAW_ENTRY%"=="" (',
+      '  echo GENWORK_OPENCLAW_ENTRY is not set 1>&2',
+      '  exit /b 127',
+      ')',
+      'if not "%GENWORK_ELECTRON_PATH%"=="" (',
+      '  set ELECTRON_RUN_AS_NODE=1',
+      '  "%GENWORK_ELECTRON_PATH%" "%GENWORK_OPENCLAW_ENTRY%" %*',
+      '  exit /b %ERRORLEVEL%',
+      ')',
+      'node "%GENWORK_OPENCLAW_ENTRY%" %*',
+      '',
+    ].join('\r\n');
+
+    try {
+      ensureDir(shimDir);
+      for (const commandName of ['openclaw', 'claw']) {
+        const shellPath = path.join(shimDir, commandName);
+        const existingShell = fs.existsSync(shellPath) ? fs.readFileSync(shellPath, 'utf8') : '';
+        if (existingShell !== shellWrapper) {
+          fs.writeFileSync(shellPath, shellWrapper, 'utf8');
+          fs.chmodSync(shellPath, 0o755);
+        }
+
+        if (process.platform === 'win32') {
+          const cmdPath = path.join(shimDir, `${commandName}.cmd`);
+          const existingCmd = fs.existsSync(cmdPath) ? fs.readFileSync(cmdPath, 'utf8') : '';
+          if (existingCmd !== windowsWrapper) {
+            fs.writeFileSync(cmdPath, windowsWrapper, 'utf8');
+          }
+        }
+      }
+
+      return shimDir;
+    } catch (error) {
+      console.error('[OpenClaw] Failed to prepare CLI shims:', error);
+      return null;
+    }
+  }
+
+  private copyDirFromAsar(srcDir: string, destDir: string): void {
+    fs.mkdirSync(destDir, { recursive: true });
+    const entries = fs.readdirSync(srcDir, { withFileTypes: true });
+    for (const entry of entries) {
+      const srcPath = path.join(srcDir, entry.name);
+      const destPath = path.join(destDir, entry.name);
+      if (entry.isDirectory()) {
+        this.copyDirFromAsar(srcPath, destPath);
+      } else {
+        fs.writeFileSync(destPath, fs.readFileSync(srcPath));
+      }
+    }
+  }
+
+  private resolveOpenClawEntry(runtimeRoot: string): string | null {
+    // Bundle fast-path via CJS launcher is only needed on Windows where
+    // the launcher also normalizes argv and file URL handling. On macOS/Linux,
+    // ensureBareEntryFiles already skips extraction when bundle exists,
+    // but this method falls through to gateway.asar/openclaw.mjs which
+    // ESM loads directly without a CJS wrapper.
+    if (process.platform === 'win32') {
+      const bundlePath = path.join(runtimeRoot, 'gateway-bundle.mjs');
+      if (fs.existsSync(bundlePath)) {
+        console.log('[OpenClaw] resolveOpenClawEntry: using bundle fast path');
+        return this.ensureGatewayLauncherCjsForBundle(runtimeRoot);
+      }
+    }
+
+    const esmEntry = findPath([
+      path.join(runtimeRoot, 'openclaw.mjs'),
+      path.join(runtimeRoot, 'dist', 'entry.js'),
+      path.join(runtimeRoot, 'dist', 'entry.mjs'),
+      path.join(runtimeRoot, 'gateway.asar', 'openclaw.mjs'),
+    ]);
+    if (!esmEntry) return null;
+
+    // On Windows, keep a CJS wrapper so ESM imports are loaded through file://
+    // URLs and drive letters (e.g. "D:") are not misinterpreted as schemes.
+    // Work around this by generating a CJS wrapper that imports the ESM entry via file:// URL.
+    if (process.platform === 'win32') {
+      return this.ensureGatewayLauncherCjs(runtimeRoot, esmEntry);
+    }
+    return esmEntry;
+  }
+
+  private ensureGatewayLauncherCjs(runtimeRoot: string, esmEntry: string): string {
+    const launcherPath = path.join(runtimeRoot, 'gateway-launcher.cjs');
+    const esmBasename = path.basename(esmEntry);
+    const expectedContent =
+      `// Auto-generated CJS wrapper for Windows ESM compatibility.\n` +
+      `// On Windows, load the ESM gateway through file:// URLs so drive letters\n` +
+      `// (e.g. "D:") are not misinterpreted as URL schemes.\n` +
+      `const { pathToFileURL } = require('node:url');\n` +
+      `const path = require('node:path');\n` +
+      `const fs = require('node:fs');\n` +
+      `// Enable V8 compile cache to speed up subsequent startups.\n` +
+      `// Cache is stored per-user so it survives app restarts and reboots.\n` +
+      `try {\n` +
+      `  const { enableCompileCache } = require('node:module');\n` +
+      `  const ccDir = path.join(process.env.OPENCLAW_STATE_DIR || __dirname, '.compile-cache');\n` +
+      `  enableCompileCache(ccDir);\n` +
+      `  process.stderr.write('[openclaw-launcher] compile-cache dir=' + require('node:module').getCompileCacheDir() + '\\n');\n` +
+      `} catch (_) {}\n` +
+      `const esmEntry = path.join(__dirname, '${esmBasename}');\n` +
+      `// Patch argv so openclaw's isMainModule() recognizes this as the main entry.\n` +
+      `// In standard Node.js: process.argv = [execPath, scriptPath, ...args]\n` +
+      `// Some Electron launch paths provide process.argv = [execPath, ...args] (no scriptPath)\n` +
+      `// We must detect which layout we have to avoid overwriting the 'gateway' command arg.\n` +
+      `// Use fs.realpathSync to resolve symlinks/junctions so that e.g.\n` +
+      `// "...current/gateway-launcher.cjs" (junction) matches "...win-x64/gateway-launcher.cjs".\n` +
+      `const _realpath = (p) => { try { return fs.realpathSync(path.resolve(p)); } catch { return path.resolve(p); } };\n` +
+      `const _launcherInArgv = process.argv[1] &&\n` +
+      `  _realpath(process.argv[1]).toLowerCase() === _realpath(__filename).toLowerCase();\n` +
+      `if (_launcherInArgv) {\n` +
+      `  process.argv[1] = esmEntry;\n` +
+      `} else {\n` +
+      `  process.argv.splice(1, 0, esmEntry);\n` +
+      `}\n` +
+      `process.stderr.write('[openclaw-launcher] argv=' + JSON.stringify(process.argv) + '\\n');\n` +
+      `process.stderr.write('[openclaw-launcher] node=' + process.versions.node + '\\n');\n` +
+      `// Keep the event loop alive while openclaw's fire-and-forget import chain\n` +
+      `// loads its full module graph and starts the gateway server. Without this,\n` +
+      `// Electron child launchers may exit before the async work completes.\n` +
+      `const _keepAlive = setInterval(() => {}, 30000);\n` +
+      `const t0 = Date.now();\n` +
+      `// Strategy 1: Try the esbuild single-file bundle via dynamic import().\n` +
+      `// The bundle collapses ~1100 ESM modules into one file, eliminating the\n` +
+      `// expensive ESM module resolution overhead in Electron child processes.\n` +
+      `// We use import() (not require()) to avoid the ESM loader re-entrancy lock\n` +
+      `// that causes microtask deadlocks when require(esm) is used.\n` +
+      `const bundlePath = path.join(__dirname, 'gateway-bundle.mjs');\n` +
+      `if (fs.existsSync(bundlePath)) {\n` +
+      `  // Patch argv[1] to the bundle path so openclaw's isMainModule() matches.\n` +
+      `  // isMainModule compares basename(import.meta.url) with basename(argv[1]);\n` +
+      `  // both will be "gateway-bundle.mjs", satisfying the basename equality check.\n` +
+      `  // argv[1] was already patched to esmEntry above; just overwrite it.\n` +
+      `  process.argv[1] = bundlePath;\n` +
+      `  process.stderr.write('[openclaw-launcher] argv(patched for bundle)=' + JSON.stringify(process.argv) + '\\n');\n` +
+      `  const bundleUrl = pathToFileURL(bundlePath).href;\n` +
+      `  process.stderr.write('[openclaw-launcher] loading bundle via import(): ' + bundleUrl + '\\n');\n` +
+      `  import(bundleUrl).then(() => {\n` +
+      `    process.stderr.write('[openclaw-launcher] import(gateway-bundle.mjs) ok (' + (Date.now() - t0) + 'ms)\\n');\n` +
+      `    try { require('node:module').flushCompileCache(); } catch (_) {}\n` +
+      `  }).catch((err) => {\n` +
+      `    process.stderr.write('[openclaw-launcher] import(gateway-bundle.mjs) failed (' + (Date.now() - t0) + 'ms): ' + (err.stack || err) + '\\n');\n` +
+      `    process.stderr.write('[openclaw-launcher] Falling back to multi-file dist...\\n');\n` +
+      `    return _loadFallback();\n` +
+      `  });\n` +
+      `} else {\n` +
+      `  _loadFallback();\n` +
+      `}\n` +
+      `// Fallback: load the original multi-file dist.\n` +
+      `function _loadFallback() {\n` +
+      `  try {\n` +
+      `    try {\n` +
+      `      const wf = require('./dist/warning-filter.js');\n` +
+      `      if (typeof wf.installProcessWarningFilter === 'function') {\n` +
+      `        wf.installProcessWarningFilter();\n` +
+      `      }\n` +
+      `    } catch (_) {}\n` +
+      `    require('./dist/entry.js');\n` +
+      `    process.stderr.write('[openclaw-launcher] require(entry.js) ok (' + (Date.now() - t0) + 'ms)\\n');\n` +
+      `    try { require('node:module').flushCompileCache(); } catch (_) {}\n` +
+      `  } catch (err) {\n` +
+      `    process.stderr.write('[openclaw-launcher] require(entry.js) failed (' + (Date.now() - t0) + 'ms): ' + err.message + '\\n');\n` +
+      `    const entryPath = path.join(__dirname, 'dist', 'entry.js');\n` +
+      `    const importUrl = pathToFileURL(entryPath).href;\n` +
+      `    process.stderr.write('[openclaw-launcher] falling back to import(): ' + importUrl + '\\n');\n` +
+      `    import(importUrl).then(() => {\n` +
+      `      process.stderr.write('[openclaw-launcher] import() ok (' + (Date.now() - t0) + 'ms)\\n');\n` +
+      `    }).catch((err2) => {\n` +
+      `      process.stderr.write('[openclaw-launcher] ERROR (' + (Date.now() - t0) + 'ms): ' + (err2.stack || err2) + '\\n');\n` +
+      `      process.exit(1);\n` +
+      `    });\n` +
+      `  }\n` +
+      `}\n`;
+
+    try {
+      const existing = fs.existsSync(launcherPath) ? fs.readFileSync(launcherPath, 'utf8') : '';
+      if (existing !== expectedContent) {
+        fs.writeFileSync(launcherPath, expectedContent, 'utf8');
+        console.log(`[OpenClaw] Generated gateway-launcher.cjs for Windows ESM compat`);
+      }
+    } catch (err) {
+      console.error('[OpenClaw] Failed to write gateway-launcher.cjs:', err);
+      return esmEntry;
+    }
+    return launcherPath;
+  }
+
+  /**
+   * Generate a simplified CJS launcher that loads gateway-bundle.mjs directly.
+   * Unlike ensureGatewayLauncherCjs(), this version does not include a fallback
+   * to dist/entry.js because the bundle is guaranteed to exist.
+   */
+  private ensureGatewayLauncherCjsForBundle(runtimeRoot: string): string {
+    const launcherPath = path.join(runtimeRoot, 'gateway-launcher.cjs');
+    const expectedContent =
+      `// Auto-generated CJS launcher for Windows — bundle-only mode.\n` +
+      `// Loads gateway-bundle.mjs directly without dist/ fallback.\n` +
+      `const { pathToFileURL } = require('node:url');\n` +
+      `const path = require('node:path');\n` +
+      `const fs = require('node:fs');\n` +
+      `const _log = (msg) => process.stderr.write('[openclaw-launcher] ' + msg + '\\n');\n` +
+      `const _t0 = Date.now();\n` +
+      `const _elapsed = () => (Date.now() - _t0) + 'ms';\n` +
+      `// ─── Compile cache setup ───\n` +
+      `try {\n` +
+      `  const { enableCompileCache, getCompileCacheDir } = require('node:module');\n` +
+      `  const _ccDir = path.join(process.env.OPENCLAW_STATE_DIR || __dirname, '.compile-cache');\n` +
+      `  enableCompileCache(_ccDir);\n` +
+      `  _log('compile-cache dir=' + getCompileCacheDir());\n` +
+      `} catch (_) {}\n` +
+      `// ─── Load bundle ───\n` +
+      `const bundlePath = path.join(__dirname, 'gateway-bundle.mjs');\n` +
+      `const _realpath = (p) => { try { return fs.realpathSync(path.resolve(p)); } catch { return path.resolve(p); } };\n` +
+      `const _launcherInArgv = process.argv[1] &&\n` +
+      `  _realpath(process.argv[1]).toLowerCase() === _realpath(__filename).toLowerCase();\n` +
+      `if (_launcherInArgv) {\n` +
+      `  process.argv[1] = bundlePath;\n` +
+      `} else {\n` +
+      `  process.argv.splice(1, 0, bundlePath);\n` +
+      `}\n` +
+      `const _keepAlive = setInterval(() => {}, 30000);\n` +
+      `const bundleUrl = pathToFileURL(bundlePath).href;\n` +
+      `try { const _sz = fs.statSync(bundlePath).size; _log('bundle size=' + (_sz / 1024 / 1024).toFixed(1) + 'MB'); } catch (_) {}\n` +
+      `_log('loading bundle (' + _elapsed() + ')');\n` +
+      `import(bundleUrl).then(() => {\n` +
+      `  _log('import ok (' + _elapsed() + ')');\n` +
+      `}).catch((err) => {\n` +
+      `  _log('import failed (' + _elapsed() + '): ' + (err.stack || err));\n` +
+      `  process.exit(1);\n` +
+      `});\n`;
+
+    try {
+      const existing = fs.existsSync(launcherPath) ? fs.readFileSync(launcherPath, 'utf8') : '';
+      if (existing !== expectedContent) {
+        if (existing) {
+          console.log('[OpenClaw] Overwriting existing gateway-launcher.cjs (switching to bundle-only mode)');
+        }
+        fs.writeFileSync(launcherPath, expectedContent, 'utf8');
+        console.log('[OpenClaw] Generated gateway-launcher.cjs for bundle-only mode');
+      }
+    } catch (err) {
+      console.error('[OpenClaw] Failed to write gateway-launcher.cjs:', err);
+      // Fall back to the legacy launcher generation
+      const esmEntry = findPath([
+        path.join(runtimeRoot, 'openclaw.mjs'),
+        path.join(runtimeRoot, 'gateway.asar', 'openclaw.mjs'),
+      ]);
+      if (esmEntry) return this.ensureGatewayLauncherCjs(runtimeRoot, esmEntry);
+      return launcherPath;
+    }
+    return launcherPath;
+  }
+
+  private resolveGatewayClientEntry(runtimeRoot: string): string | null {
+    const distRoots = [
+      path.join(runtimeRoot, 'dist'),
+      path.join(runtimeRoot, 'gateway.asar', 'dist'),
+    ];
+
+    for (const distRoot of distRoots) {
+      const clientEntry = this.findGatewayClientEntryFromDistRoot(distRoot);
+      if (clientEntry) {
+        return clientEntry;
+      }
+    }
+
+    return null;
+  }
+
+  private findGatewayClientEntryFromDistRoot(distRoot: string): string | null {
+    // v2026.4.5+: GatewayClient is exported via the plugin-sdk public subpath
+    // (openclaw/plugin-sdk/gateway-runtime). The class is no longer in a
+    // standalone client-*.js chunk — it was merged into a shared chunk with
+    // minified export names (e.g. `n, r, t`), which breaks duck-type detection
+    // in loadGatewayClientCtor(). The plugin-sdk barrel re-exports the named
+    // `GatewayClient` symbol, so we prefer this stable entry point.
+    const pluginSdkGatewayRuntime = path.join(distRoot, 'plugin-sdk', 'gateway-runtime.js');
+    if (fs.existsSync(pluginSdkGatewayRuntime)) {
+      return pluginSdkGatewayRuntime;
+    }
+
+    // Pre-v2026.4.5: GatewayClient lived in a dedicated file under dist/.
+    const gatewayClient = path.join(distRoot, 'gateway', 'client.js');
+    if (fs.existsSync(gatewayClient)) {
+      return gatewayClient;
+    }
+
+    const directClient = path.join(distRoot, 'client.js');
+    if (fs.existsSync(directClient)) {
+      return directClient;
+    }
+
+    // Last resort: match any client-*.js file in dist root. Note that since
+    // v2026.4.5 this may resolve to an unrelated RPC utilities chunk, so this
+    // fallback is only meaningful for older versions.
+    try {
+      if (!fs.existsSync(distRoot) || !fs.statSync(distRoot).isDirectory()) {
+        return null;
+      }
+
+      const candidates = fs.readdirSync(distRoot)
+        .filter((name) => /^client(?:-.*)?\.js$/i.test(name))
+        .sort();
+      if (candidates.length > 0) {
+        return path.join(distRoot, candidates[0]);
+      }
+    } catch {
+      // ignore
+    }
+
+    return null;
+  }
+
+  private ensureGatewayToken(): string {
+    try {
+      const existing = fs.readFileSync(this.gatewayTokenPath, 'utf8').trim();
+      if (existing) {
+        return existing;
+      }
+    } catch {
+      // ignore
+    }
+
+    const token = crypto.randomBytes(24).toString('hex');
+    ensureDir(path.dirname(this.gatewayTokenPath));
+    fs.writeFileSync(this.gatewayTokenPath, token, 'utf8');
+    return token;
+  }
+
+  getGatewayToken(): string | null {
+    return this.readGatewayToken();
+  }
+
+  private readGatewayToken(): string | null {
+    try {
+      const token = fs.readFileSync(this.gatewayTokenPath, 'utf8').trim();
+      return token || null;
+    } catch {
+      return null;
+    }
+  }
+
+  private ensureConfigFile(): void {
+    ensureDir(path.dirname(this.configPath));
+    if (!fs.existsSync(this.configPath)) {
+      fs.writeFileSync(this.configPath, JSON.stringify({ gateway: { mode: 'local' } }, null, 2) + '\n', 'utf8');
+      return;
+    }
+    // Ensure gateway.mode is set even if config already exists
+    try {
+      const raw = fs.readFileSync(this.configPath, 'utf8');
+      const config = JSON.parse(raw);
+      if (!config.gateway?.mode) {
+        config.gateway = { ...config.gateway, mode: 'local' };
+        fs.writeFileSync(this.configPath, JSON.stringify(config, null, 2) + '\n', 'utf8');
+      }
+    } catch {
+      // ignore parse errors
+    }
+  }
+
+  private writeGatewayPort(port: number): void {
+    fs.writeFileSync(this.gatewayPortPath, JSON.stringify({ port, updatedAt: Date.now() }, null, 2), 'utf8');
+  }
+
+  private readGatewayPort(): number | null {
+    const payload = parseJsonFile<{ port?: number }>(this.gatewayPortPath);
+    if (!payload || typeof payload.port !== 'number' || !Number.isInteger(payload.port)) {
+      return null;
+    }
+    if (payload.port <= 0 || payload.port > 65535) {
+      return null;
+    }
+    return payload.port;
+  }
+
+  private async resolveGatewayPort(): Promise<number> {
+    const candidates: number[] = [];
+
+    candidates.push(DEFAULT_GATEWAY_PORT);
+    if (this.gatewayPort) candidates.push(this.gatewayPort);
+    const persisted = this.readGatewayPort();
+    if (persisted) candidates.push(persisted);
+
+    const uniqCandidates = Array.from(new Set(candidates));
+    for (const candidate of uniqCandidates) {
+      if (await isPortAvailable(candidate)) {
+        return candidate;
+      }
+    }
+
+    // Scan ports in parallel batches of 10 for faster resolution.
+    const BATCH_SIZE = 10;
+    for (let batch = 0; batch * BATCH_SIZE < GATEWAY_PORT_SCAN_LIMIT; batch += 1) {
+      const batchStart = DEFAULT_GATEWAY_PORT + batch * BATCH_SIZE + 1;
+      const batchEnd = Math.min(batchStart + BATCH_SIZE, DEFAULT_GATEWAY_PORT + GATEWAY_PORT_SCAN_LIMIT + 1);
+      const portBatch = Array.from({ length: batchEnd - batchStart }, (_, i) => batchStart + i);
+      const results = await Promise.all(
+        portBatch.map(async (p) => (await isPortAvailable(p)) ? p : null),
+      );
+      const available = results.find((p) => p !== null);
+      if (available != null) {
+        return available;
+      }
+    }
+
+    throw new Error('No available loopback port for OpenClaw gateway.');
+  }
+
+  private async isGatewayHealthy(port: number, verbose = false): Promise<boolean> {
+    const probeUrls = [
+      `http://127.0.0.1:${port}/health`,
+      `http://127.0.0.1:${port}/healthz`,
+      `http://127.0.0.1:${port}/ready`,
+      `http://127.0.0.1:${port}/`,
+    ];
+
+    // Run all HTTP probes in parallel and resolve as soon as any succeeds.
+    // Previously these ran sequentially, costing up to 4*1200ms per tick.
+    const httpResults: string[] = [];
+    const httpProbes = probeUrls.map(async (url, i) => {
+      try {
+        const response = await fetchWithTimeout(url, 1500);
+        if (verbose) httpResults[i] = `${url} → ${response.status}`;
+        if (response.status < 500) return true;
+      } catch (err) {
+        if (verbose) httpResults[i] = `${url} → ${(err as Error).message || err}`;
+      }
+      return false;
+    });
+
+    // Also probe TCP reachability in parallel as fallback.
+    const tcpProbe = isPortReachable('127.0.0.1', port, 1500);
+
+    const results = await Promise.all([...httpProbes, tcpProbe]);
+    const healthy = results.some(Boolean);
+    if (verbose && !healthy) {
+      const tcpResult = results[results.length - 1] ? 'reachable' : 'unreachable';
+      console.log(`[OpenClaw] health probe details: tcp=${tcpResult}, ${httpResults.join(', ')}`);
+    }
+    return healthy;
+  }
+
+  private waitForGatewayReady(port: number, timeoutMs: number): Promise<boolean> {
+    const startedAt = Date.now();
+    let pollCount = 0;
+    return new Promise((resolve) => {
+      const tick = async () => {
+        if (this.shutdownRequested) {
+          console.log('[OpenClaw] waitForGatewayReady: shutdown requested, giving up');
+          resolve(false);
+          return;
+        }
+
+        if (!this.gatewayProcess) {
+          console.log('[OpenClaw] waitForGatewayReady: gateway process is gone (exited early), giving up');
+          resolve(false);
+          return;
+        }
+
+        pollCount += 1;
+        const elapsedMs = Date.now() - startedAt;
+
+        // Log verbose probe details every 10 polls (~6s) to diagnose health check failures.
+        const verboseProbe = pollCount % 10 === 0;
+        const healthy = await this.isGatewayHealthy(port, verboseProbe);
+        if (healthy) {
+          console.log(`[OpenClaw] waitForGatewayReady: gateway healthy after ${elapsedMs}ms (${pollCount} polls)`);
+          resolve(true);
+          return;
+        }
+
+        if (elapsedMs >= timeoutMs) {
+          console.log(`[OpenClaw] waitForGatewayReady: timed out after ${timeoutMs}ms (${pollCount} polls)`);
+          resolve(false);
+          return;
+        }
+
+        // Update progress from 10% → 90% during the wait, so the UI shows meaningful feedback.
+        const progress = Math.min(90, 10 + Math.round((elapsedMs / timeoutMs) * 80));
+        this.setStatus({
+          phase: 'starting',
+          version: this.status.version,
+          progressPercent: progress,
+          message: `Starting OpenClaw gateway... (${Math.round(elapsedMs / 1000)}s)`,
+          canRetry: false,
+        });
+
+        if (pollCount % 5 === 0) {
+          console.log(`[OpenClaw] waitForGatewayReady: poll #${pollCount}, elapsed=${elapsedMs}ms, progress=${progress}%`);
+        }
+
+        setTimeout(() => {
+          void tick();
+        }, 600);
+      };
+
+      void tick();
+    });
+  }
+
+  private stopGatewayProcess(child: GatewayProcess): Promise<void> {
+    const pid = 'pid' in child ? child.pid : undefined;
+    console.log(`${gwDiagTs()} stopGatewayProcess: sending graceful kill to pid=${pid}`);
+    this.expectedGatewayExits.add(child);
+
+    return new Promise<void>((resolve) => {
+      // Already exited — resolve immediately.
+      if ('exitCode' in child && child.exitCode !== null) {
+        resolve();
+        return;
+      }
+
+      const timeoutMs = 5_000;
+      let settled = false;
+
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(forceTimer);
+        resolve();
+      };
+
+      // Listen for exit (ChildProcess) or exit (UtilityProcess).
+      child.once('exit', done);
+
+      // First attempt: graceful kill.
+      try {
+        child.kill();
+      } catch {
+        // ignore
+      }
+
+      // Fallback: force-kill after 1.2s if still alive, then hard-timeout at 5s.
+      const forceTimer = setTimeout(() => {
+        console.log(`${gwDiagTs()} stopGatewayProcess: graceful kill timed out after 1.2s, force-killing pid=${pid}`);
+        try {
+          if ('pid' in child && typeof child.pid === 'number') {
+            child.kill();
+          }
+        } catch {
+          // ignore
+        }
+        // Guarantee we don't block shutdown forever.
+        setTimeout(done, 2_000);
+      }, 1_200);
+
+      // Hard timeout: always resolve within timeoutMs.
+      setTimeout(done, timeoutMs);
+    });
+  }
+
+  // Workaround: Electron child-process logs can contain UTC timestamps.
+  private static rewriteUtcTimestamps(text: string): string {
+    return text.replace(
+      /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g,
+      (utc) => {
+        const d = new Date(utc);
+        if (Number.isNaN(d.getTime())) return utc;
+        const pad = (n: number) => String(n).padStart(2, '0');
+        const ms = String(d.getMilliseconds()).padStart(3, '0');
+        const offsetMin = -d.getTimezoneOffset();
+        const sign = offsetMin >= 0 ? '+' : '-';
+        const absH = Math.floor(Math.abs(offsetMin) / 60);
+        const absM = Math.abs(offsetMin) % 60;
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${ms}${sign}${pad(absH)}:${pad(absM)}`;
+      },
+    );
+  }
+
+  private attachGatewayProcessLogs(child: GatewayProcess): void {
+    ensureDir(this.logsDir);
+    this.pruneGatewayLogsIfNeeded();
+    const appendRecentOutput = (chunk: Buffer | string, stream: 'stdout' | 'stderr') => {
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      const lines = text
+        .split(/\r?\n/)
+        .map((line) => line.trimEnd())
+        .filter((line) => line.length > 0)
+        .map((line) => `[${stream}] ${line}`);
+      if (lines.length === 0) return;
+      const recent = this.gatewayRecentOutput.get(child) ?? [];
+      recent.push(...lines);
+      if (recent.length > GATEWAY_RECENT_OUTPUT_LINE_LIMIT) {
+        recent.splice(0, recent.length - GATEWAY_RECENT_OUTPUT_LINE_LIMIT);
+      }
+      this.gatewayRecentOutput.set(child, recent);
+    };
+    const appendLog = (chunk: Buffer | string, stream: 'stdout' | 'stderr') => {
+      appendRecentOutput(chunk, stream);
+      this.pruneGatewayLogsIfNeeded();
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      const line = `[${new Date().toISOString()}] [${stream}] ${text}`;
+      fs.appendFile(this.getGatewayLogPath(), line, () => {
+        // best-effort log append
+      });
+    };
+
+    // Log elapsed time when gateway emits key startup milestones.
+    // This fills the observability gap between "import ok" and "[gateway] ready".
+    const logStartupMilestone = (text: string) => {
+      if (!this.gatewaySpawnedAt) return;
+      if (/\[gateway\]/.test(text)) {
+        const elapsed = Date.now() - this.gatewaySpawnedAt;
+        const summary = text.replace(/\n+$/g, '').split('\n')[0].trim();
+        console.log(`[OpenClaw] startup milestone (${elapsed}ms since spawn): ${summary}`);
+      }
+    };
+
+    child.stdout?.on('data', (chunk) => {
+      appendLog(chunk, 'stdout');
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      logStartupMilestone(text);
+      console.log(`[OpenClaw stdout] ${OpenClawEngineManager.rewriteUtcTimestamps(text)}`);
+    });
+    child.stderr?.on('data', (chunk) => {
+      appendLog(chunk, 'stderr');
+      const text = typeof chunk === 'string' ? chunk : chunk.toString();
+      const recentOutput = (this.gatewayRecentOutput.get(child) ?? []).join('\n');
+      this.recordGatewayFatalFailure(child, recentOutput);
+      logStartupMilestone(text);
+      console.error(`[OpenClaw stderr] ${OpenClawEngineManager.rewriteUtcTimestamps(text)}`);
+    });
+  }
+
+  private recordGatewayFatalFailure(child: GatewayProcess, output: string): void {
+    if (!isOpenClawGatewayHeapOutOfMemory(output)) return;
+    const existing = this.gatewayFailureByProcess.get(child);
+    if (existing?.kind === OpenClawGatewayFailureKind.HeapOutOfMemory) return;
+
+    const failure: OpenClawGatewayFailureSnapshot = {
+      generation: this.gatewayGenerationByProcess.get(child) ?? this.gatewayGeneration,
+      kind: OpenClawGatewayFailureKind.HeapOutOfMemory,
+      detectedAt: Date.now(),
+    };
+    this.gatewayFailureByProcess.set(child, failure);
+    this.lastGatewayFailure = failure;
+    console.error(
+      `${gwDiagTs()} gateway fatal failure detected: `
+      + `generation=${failure.generation}, kind=${failure.kind}`,
+    );
+  }
+
+  private attachGatewayExitHandlers(child: GatewayProcess): void {
+    child.once('error', (...args: unknown[]) => {
+      const errorMsg = args[0] instanceof Error
+        ? args[0].message
+        : `${args[0]}${args[1] ? ` (${args[1]})` : ''}`;
+      console.error(`${gwDiagTs()} gateway process error event: ${errorMsg}`);
+      // Don't delete from expectedGatewayExits here — the 'exit' event always
+      // follows and handles cleanup. Deleting here would cause 'exit' to miss
+      // the expected-exit guard, triggering a spurious restart.
+      if (this.expectedGatewayExits.has(child)) return;
+      if (this.shutdownRequested) return;
+      this.setStatus({
+        phase: 'error',
+        version: this.status.version,
+        message: `OpenClaw gateway process error: ${errorMsg}`,
+        canRetry: true,
+      });
+    });
+
+    (child as NodeJS.EventEmitter).once('exit', (code: number | null, signal?: string) => {
+      console.log(`${gwDiagTs()} gateway process exited with code=${code}, signal=${signal ?? 'none'}`);
+      const recentOutput = (this.gatewayRecentOutput.get(child) ?? []).join('\n');
+      this.gatewayRecentOutput.delete(child);
+      if (this.gatewayProcess === child) {
+        this.gatewayProcess = null;
+        // A self-restart never exits the process; if it exited anyway the
+        // self-restart failed and normal crash handling owns recovery.
+        this.clearGatewaySelfRestart();
+      }
+      if (this.expectedGatewayExits.has(child)) {
+        this.expectedGatewayExits.delete(child);
+        return;
+      }
+      if (this.shutdownRequested) return;
+
+      let tail = recentOutput;
+      try {
+        tail = tail || fs.readFileSync(this.getGatewayLogPath(), 'utf8').split('\n').slice(-30).join('\n');
+        console.error(`${gwDiagTs()} gateway log tail (last 30 lines before crash):\n${tail}`);
+      } catch { /* log file may not exist */ }
+
+      this.recordGatewayFatalFailure(child, tail);
+      const detectedFailure = this.gatewayFailureByProcess.get(child);
+      const processFailure = detectedFailure
+        ? { ...detectedFailure, exitCode: code }
+        : null;
+      if (processFailure) {
+        this.gatewayFailureByProcess.set(child, processFailure);
+        this.lastGatewayFailure = processFailure;
+      }
+
+      if (isOpenClawConfigStartupFailure(tail)) {
+        console.error(`${gwDiagTs()} gateway exited during startup because OpenClaw config is invalid; auto-restart suppressed`);
+        this.gatewayRestartAttempt = 0;
+        this.setStatus({
+          phase: 'error',
+          version: this.status.version,
+          message: 'OpenClaw gateway startup stopped because openclaw.json is invalid. Repair the config or use Quick Repair before restarting.',
+          canRetry: true,
+        });
+        return;
+      }
+
+      if (processFailure?.kind === OpenClawGatewayFailureKind.HeapOutOfMemory) {
+        this.setStatus({
+          phase: 'error',
+          version: this.status.version,
+          message: `OpenClaw gateway ran out of JavaScript heap memory (code=${code ?? 'null'}).`,
+          canRetry: true,
+        });
+        this.scheduleGatewayRestart();
+        return;
+      }
+
+      this.setStatus({
+        phase: 'error',
+        version: this.status.version,
+        message: `OpenClaw gateway exited unexpectedly (code=${code ?? 'null'}).`,
+        canRetry: true,
+      });
+      this.scheduleGatewayRestart();
+    });
+  }
+
+  private scheduleGatewayRestart(): void {
+    if (this.shutdownRequested) return;
+    if (this.gatewayRestartTimer) return;
+
+    if (this.gatewayRestartAttempt >= GATEWAY_MAX_RESTART_ATTEMPTS) {
+      console.error(`${gwDiagTs()} gateway auto-restart limit reached (${GATEWAY_MAX_RESTART_ATTEMPTS} attempts), giving up`);
+      this.setStatus({
+        phase: 'error',
+        version: this.status.version,
+        message: `OpenClaw gateway failed to start after ${GATEWAY_MAX_RESTART_ATTEMPTS} attempts. Check model configuration or restart manually.`,
+        canRetry: true,
+      });
+      return;
+    }
+
+    const delay = GATEWAY_RESTART_DELAYS[Math.min(this.gatewayRestartAttempt, GATEWAY_RESTART_DELAYS.length - 1)];
+    this.gatewayRestartAttempt++;
+    console.log(`${gwDiagTs()} scheduling gateway restart attempt ${this.gatewayRestartAttempt}/${GATEWAY_MAX_RESTART_ATTEMPTS} in ${delay}ms`);
+    console.log(`${gwDiagTs()} restart context: port=${this.gatewayPort ?? 'none'}, configPath=${this.configPath}, stateDir=${this.stateDir}`);
+
+    this.gatewayRestartTimer = setTimeout(() => {
+      this.gatewayRestartTimer = null;
+      if (this.shutdownRequested) return;
+      void this.startGateway('auto-restart-after-crash');
+    }, delay);
+  }
+
+  private setStatus(next: OpenClawEngineStatus): void {
+    this.status = {
+      ...next,
+      message: next.message ? next.message.slice(0, 500) : undefined,
+    };
+    this.emit('status', this.getStatus());
+  }
+}

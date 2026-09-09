@@ -1,0 +1,804 @@
+/**
+ * IM Gateway Types for Renderer Process
+ * Mirrors src/main/im/types.ts for use in React components
+ */
+
+import type { Platform } from '@shared/platform';
+
+// ==================== DingTalk Types ====================
+
+export interface DingTalkOpenClawConfig {
+  enabled: boolean;
+  clientId: string;
+  clientSecret: string;
+  dmPolicy: 'open' | 'pairing' | 'allowlist';
+  allowFrom: string[];
+  groupPolicy: 'open' | 'allowlist';
+  /** @deprecated since dingtalk-connector v0.7.5 – use Gateway session.reset.idleMinutes instead */
+  sessionTimeout: number;
+  separateSessionByConversation: boolean;
+  groupSessionScope: 'group' | 'group_sender';
+  sharedMemoryAcrossConversations: boolean;
+  gatewayBaseUrl: string;
+  debug: boolean;
+}
+
+export interface DingTalkGatewayStatus {
+  connected: boolean;
+  startedAt: number | null;
+  lastError: string | null;
+  lastInboundAt: number | null;
+  lastOutboundAt: number | null;
+}
+
+// ==================== DingTalk Multi-Instance Types ====================
+
+export const MAX_DINGTALK_INSTANCES = 20;
+
+export interface DingTalkInstanceConfig extends DingTalkOpenClawConfig {
+  instanceId: string;
+  instanceName: string;
+}
+
+export interface DingTalkInstanceStatus extends DingTalkGatewayStatus {
+  instanceId: string;
+  instanceName: string;
+}
+
+export interface DingTalkMultiInstanceConfig {
+  instances: DingTalkInstanceConfig[];
+}
+
+export interface DingTalkMultiInstanceStatus {
+  instances: DingTalkInstanceStatus[];
+}
+
+export const DEFAULT_DINGTALK_MULTI_INSTANCE_CONFIG: DingTalkMultiInstanceConfig = {
+  instances: [],
+};
+
+// ==================== Feishu Types ====================
+
+export interface FeishuOpenClawGroupConfig {
+  requireMention?: boolean;
+  allowFrom?: string[];
+  systemPrompt?: string;
+}
+
+export interface FeishuOpenClawFooterConfig {
+  status?: boolean;
+  elapsed?: boolean;
+}
+
+export interface FeishuOpenClawBlockStreamingCoalesceConfig {
+  minChars?: number;
+  maxChars?: number;
+  idleMs?: number;
+}
+
+export interface FeishuOpenClawConfig {
+  enabled: boolean;
+  appId: string;
+  appSecret: string;
+  domain: 'feishu' | 'lark' | string;
+  dmPolicy: 'pairing' | 'allowlist' | 'open' | 'disabled';
+  allowFrom: string[];
+  groupPolicy: 'allowlist' | 'open' | 'disabled';
+  groupAllowFrom: string[];
+  groups: Record<string, FeishuOpenClawGroupConfig>;
+  historyLimit: number;
+  streaming: boolean;
+  replyMode: 'auto' | 'static' | 'streaming';
+  blockStreaming: boolean;
+  footer: FeishuOpenClawFooterConfig;
+  blockStreamingCoalesce?: FeishuOpenClawBlockStreamingCoalesceConfig;
+  mediaMaxMb: number;
+  debug: boolean;
+}
+
+export interface FeishuGatewayStatus {
+  connected: boolean;
+  startedAt: string | null;
+  botOpenId: string | null;
+  error: string | null;
+  lastInboundAt: number | null;
+  lastOutboundAt: number | null;
+}
+
+// ==================== Feishu Multi-Instance Types ====================
+
+export const MAX_FEISHU_INSTANCES = 20;
+
+export interface FeishuInstanceConfig extends FeishuOpenClawConfig {
+  instanceId: string;
+  instanceName: string;
+}
+
+export interface FeishuInstanceStatus extends FeishuGatewayStatus {
+  instanceId: string;
+  instanceName: string;
+}
+
+export interface FeishuMultiInstanceConfig {
+  instances: FeishuInstanceConfig[];
+}
+
+export interface FeishuMultiInstanceStatus {
+  instances: FeishuInstanceStatus[];
+}
+
+// ==================== Telegram Types ====================
+
+export interface TelegramGatewayStatus {
+  connected: boolean;
+  startedAt: number | null;
+  lastError: string | null;
+  botUsername: string | null;
+  lastInboundAt: number | null;
+  lastOutboundAt: number | null;
+}
+
+// ==================== Telegram OpenClaw Types ====================
+
+export interface TelegramOpenClawGroupConfig {
+  requireMention?: boolean;
+  allowFrom?: string[];
+  systemPrompt?: string;
+}
+
+export interface TelegramOpenClawConfig {
+  enabled: boolean;
+  botToken: string;
+  dmPolicy: 'pairing' | 'allowlist' | 'open' | 'disabled';
+  allowFrom: string[];
+  groupPolicy: 'allowlist' | 'open' | 'disabled';
+  groupAllowFrom: string[];
+  groups: Record<string, TelegramOpenClawGroupConfig>;
+  historyLimit: number;
+  replyToMode: 'off' | 'first' | 'all';
+  linkPreview: boolean;
+  streaming: 'off' | 'partial' | 'block' | 'progress';
+  mediaMaxMb: number;
+  proxy: string;
+  webhookUrl: string;
+  webhookSecret: string;
+  debug: boolean;
+}
+
+// ==================== Telegram Multi-Instance Types ====================
+
+export const MAX_TELEGRAM_INSTANCES = 20;
+
+export interface TelegramInstanceConfig extends TelegramOpenClawConfig {
+  instanceId: string;
+  instanceName: string;
+}
+
+export interface TelegramInstanceStatus extends TelegramGatewayStatus {
+  instanceId: string;
+  instanceName: string;
+}
+
+export interface TelegramMultiInstanceConfig {
+  instances: TelegramInstanceConfig[];
+}
+
+export interface TelegramMultiInstanceStatus {
+  instances: TelegramInstanceStatus[];
+}
+
+// ==================== Discord Types ====================
+
+export interface DiscordOpenClawGuildConfig {
+  requireMention?: boolean;
+  allowFrom?: string[];
+  systemPrompt?: string;
+}
+
+export interface DiscordOpenClawConfig {
+  enabled: boolean;
+  botToken: string;
+  dmPolicy: 'pairing' | 'allowlist' | 'open' | 'disabled';
+  allowFrom: string[];
+  groupPolicy: 'allowlist' | 'open' | 'disabled';
+  groupAllowFrom: string[];
+  guilds: Record<string, DiscordOpenClawGuildConfig>;
+  historyLimit: number;
+  streaming: 'off' | 'partial' | 'block' | 'progress';
+  mediaMaxMb: number;
+  proxy: string;
+  debug: boolean;
+}
+
+export interface DiscordGatewayStatus {
+  connected: boolean;
+  starting: boolean;
+  startedAt: number | null;
+  lastError: string | null;
+  botUsername: string | null;
+  lastInboundAt: number | null;
+  lastOutboundAt: number | null;
+}
+
+export const MAX_DISCORD_INSTANCES = 20;
+
+export interface DiscordInstanceConfig extends DiscordOpenClawConfig {
+  instanceId: string;
+  instanceName: string;
+}
+
+export interface DiscordInstanceStatus extends DiscordGatewayStatus {
+  instanceId: string;
+  instanceName: string;
+}
+
+export interface DiscordMultiInstanceConfig {
+  instances: DiscordInstanceConfig[];
+}
+
+export interface DiscordMultiInstanceStatus {
+  instances: DiscordInstanceStatus[];
+}
+
+// ==================== QQ Types ====================
+
+export interface QQOpenClawConfig {
+  enabled: boolean;
+  appId: string;
+  appSecret: string;
+  dmPolicy: 'open' | 'pairing' | 'allowlist';
+  allowFrom: string[];
+  groupPolicy: 'open' | 'allowlist' | 'disabled';
+  groupAllowFrom: string[];
+  historyLimit: number;
+  markdownSupport: boolean;
+  imageServerBaseUrl: string;
+  debug: boolean;
+}
+
+/** @deprecated Use QQOpenClawConfig instead */
+export type QQConfig = QQOpenClawConfig;
+
+export interface QQGatewayStatus {
+  connected: boolean;
+  startedAt: number | null;
+  lastError: string | null;
+  lastInboundAt: number | null;
+  lastOutboundAt: number | null;
+}
+
+// ==================== QQ Multi-Instance Types ====================
+
+export const MAX_QQ_INSTANCES = 5;
+
+export interface QQInstanceConfig extends QQOpenClawConfig {
+  instanceId: string;
+  instanceName: string;
+}
+
+export interface QQInstanceStatus extends QQGatewayStatus {
+  instanceId: string;
+  instanceName: string;
+}
+
+export interface QQMultiInstanceConfig {
+  instances: QQInstanceConfig[];
+}
+
+export interface QQMultiInstanceStatus {
+  instances: QQInstanceStatus[];
+}
+
+// ==================== WeCom (企业微信) Types ====================
+
+export interface WecomOpenClawConfig {
+  enabled: boolean;
+  botId: string;
+  secret: string;
+  dmPolicy: 'open' | 'pairing' | 'allowlist' | 'disabled';
+  allowFrom: string[];
+  groupPolicy: 'open' | 'allowlist' | 'disabled';
+  groupAllowFrom: string[];
+  sendThinkingMessage: boolean;
+  debug: boolean;
+}
+
+/** @deprecated Use WecomOpenClawConfig instead */
+export type WecomConfig = WecomOpenClawConfig;
+
+export interface WecomGatewayStatus {
+  connected: boolean;
+  startedAt: number | null;
+  lastError: string | null;
+  botId: string | null;
+  lastInboundAt: number | null;
+  lastOutboundAt: number | null;
+}
+
+// ==================== WeCom Multi-Instance Types ====================
+
+export const MAX_WECOM_INSTANCES = 20;
+
+export interface WecomInstanceConfig extends WecomOpenClawConfig {
+  instanceId: string;
+  instanceName: string;
+}
+
+export interface WecomInstanceStatus extends WecomGatewayStatus {
+  instanceId: string;
+  instanceName: string;
+}
+
+export interface WecomMultiInstanceConfig {
+  instances: WecomInstanceConfig[];
+}
+
+export interface WecomMultiInstanceStatus {
+  instances: WecomInstanceStatus[];
+}
+
+// ==================== POPO Types ====================
+
+export interface PopoOpenClawConfig {
+  enabled: boolean;
+  connectionMode: 'websocket' | 'webhook';
+  appKey: string;
+  appSecret: string;
+  token: string;
+  aesKey: string;
+  webhookBaseUrl: string;
+  webhookPath: string;
+  webhookPort: number;
+  dmPolicy: 'open' | 'pairing' | 'allowlist' | 'disabled';
+  allowFrom: string[];
+  groupPolicy: 'open' | 'allowlist' | 'disabled';
+  groupAllowFrom: string[];
+  textChunkLimit: number;
+  richTextChunkLimit: number;
+  debug: boolean;
+}
+
+export interface PopoGatewayStatus {
+  connected: boolean;
+  startedAt: number | null;
+  lastError: string | null;
+  lastInboundAt: number | null;
+  lastOutboundAt: number | null;
+}
+
+export const MAX_POPO_INSTANCES = 20;
+
+export interface PopoInstanceConfig extends PopoOpenClawConfig {
+  instanceId: string;
+  instanceName: string;
+}
+
+export interface PopoInstanceStatus extends PopoGatewayStatus {
+  instanceId: string;
+  instanceName: string;
+}
+
+export interface PopoMultiInstanceConfig {
+  instances: PopoInstanceConfig[];
+}
+
+export interface PopoMultiInstanceStatus {
+  instances: PopoInstanceStatus[];
+}
+
+// ==================== Weixin (微信) Types ====================
+
+export interface WeixinOpenClawConfig {
+  enabled: boolean;
+  accountId: string;
+  dmPolicy: 'open' | 'pairing' | 'allowlist' | 'disabled';
+  allowFrom: string[];
+  groupPolicy: 'open' | 'allowlist' | 'disabled';
+  groupAllowFrom: string[];
+  debug: boolean;
+}
+
+export interface WeixinGatewayStatus {
+  connected: boolean;
+  accountId: string | null;
+  startedAt: number | null;
+  lastError: string | null;
+  lastInboundAt: number | null;
+  lastOutboundAt: number | null;
+}
+
+// ==================== Email Channel Types ====================
+
+export interface EmailInstanceConfig {
+  instanceId: string;
+  instanceName: string;
+  enabled: boolean;
+  transport: 'imap' | 'ws';
+  email: string;
+  password?: string;
+  apiKey?: string;
+  agentId: string;
+  imapHost?: string;
+  imapPort?: number;
+  smtpHost?: string;
+  smtpPort?: number;
+  allowFrom?: string[];
+  replyMode?: 'immediate' | 'accumulated' | 'complete';
+  replyTo?: 'sender' | 'all';
+  a2aEnabled?: boolean;
+  a2aAgentDomains?: string[];
+  a2aMaxPingPongTurns?: number;
+}
+
+export interface EmailMultiInstanceConfig {
+  instances: EmailInstanceConfig[];
+}
+
+export interface EmailInstanceStatus {
+  instanceId: string;
+  instanceName: string;
+  connected: boolean;
+  startedAt: number | null;
+  lastError: string | null;
+  email: string | null;
+  transport: 'imap' | 'ws' | null;
+  lastInboundAt: number | null;
+  lastOutboundAt: number | null;
+}
+
+export interface EmailMultiInstanceStatus {
+  instances: EmailInstanceStatus[];
+}
+
+export const DEFAULT_EMAIL_MULTI_INSTANCE_CONFIG: EmailMultiInstanceConfig = {
+  instances: [],
+};
+
+export const DEFAULT_EMAIL_INSTANCE_CONFIG: Partial<EmailInstanceConfig> = {
+  enabled: false,
+  transport: 'ws',
+  agentId: 'main',
+  replyMode: 'complete',
+  replyTo: 'sender',
+  allowFrom: ['*'],
+};
+
+export const MAX_EMAIL_INSTANCES = 20;
+
+// ==================== Common IM Types ====================
+
+export type IMPlatform = keyof Omit<IMGatewayConfig, 'settings'> | 'xiaomifeng';
+
+export interface IMGatewayConfig {
+  dingtalk: DingTalkMultiInstanceConfig;
+  feishu: FeishuMultiInstanceConfig;
+  telegram: TelegramMultiInstanceConfig;
+  qq: QQMultiInstanceConfig;
+  discord: DiscordMultiInstanceConfig;
+  wecom: WecomMultiInstanceConfig;
+  popo: PopoMultiInstanceConfig;
+  weixin: WeixinOpenClawConfig;
+  email: EmailMultiInstanceConfig;
+  settings: IMSettings;
+}
+
+export interface IMSettings {
+  systemPrompt?: string;
+  skillsEnabled: boolean;
+  /** Per-platform agent binding. Key = platform name, value = agent ID. Absent or 'main' = default. */
+  platformAgentBindings?: Record<string, string>;
+}
+
+export interface IMGatewayStatus {
+  dingtalk: DingTalkMultiInstanceStatus;
+  feishu: FeishuMultiInstanceStatus;
+  qq: QQMultiInstanceStatus;
+  telegram: TelegramMultiInstanceStatus;
+  discord: DiscordMultiInstanceStatus;
+  wecom: WecomMultiInstanceStatus;
+  popo: PopoMultiInstanceStatus;
+  weixin: WeixinGatewayStatus;
+  email: EmailMultiInstanceStatus;
+}
+
+// ==================== Media Attachment Types ====================
+
+export type IMMediaType = 'image' | 'video' | 'audio' | 'voice' | 'document' | 'sticker';
+
+export interface IMMediaAttachment {
+  type: IMMediaType;
+  localPath: string;          // 下载后的本地路径
+  mimeType: string;           // MIME 类型
+  fileName?: string;          // 原始文件名
+  fileSize?: number;          // 文件大小（字节）
+  width?: number;             // 图片/视频宽度
+  height?: number;            // 图片/视频高度
+  duration?: number;          // 音视频时长（秒）
+}
+
+export interface IMMessage {
+  platform: Platform;
+  messageId: string;
+  conversationId: string;
+  senderId: string;
+  senderName?: string;
+  content: string;
+  chatType: 'direct' | 'group';
+  timestamp: number;
+  attachments?: IMMediaAttachment[];
+  mediaGroupId?: string;      // 媒体组 ID（用于合并多张图片）
+}
+
+// ==================== IPC Result Types ====================
+
+export interface IMConfigResult {
+  success: boolean;
+  config?: IMGatewayConfig;
+  error?: string;
+}
+
+export interface IMStatusResult {
+  success: boolean;
+  status?: IMGatewayStatus;
+  error?: string;
+}
+
+export interface IMGatewayResult {
+  success: boolean;
+  skipped?: boolean;
+  error?: string;
+}
+
+// ==================== Connectivity Test Types ====================
+
+export type IMConnectivityVerdict = 'pass' | 'warn' | 'fail';
+
+export type IMConnectivityCheckLevel = 'pass' | 'info' | 'warn' | 'fail';
+
+export type IMConnectivityCheckCode =
+  | 'missing_credentials'
+  | 'auth_check'
+  | 'gateway_running'
+  | 'inbound_activity'
+  | 'outbound_activity'
+  | 'platform_last_error'
+  | 'feishu_group_requires_mention'
+  | 'feishu_event_subscription_required'
+  | 'discord_group_requires_mention'
+  | 'telegram_privacy_mode_hint'
+  | 'dingtalk_bot_membership_hint'
+  | 'openclaw_gateway_not_running'
+  | 'qq_guild_mention_hint';
+
+export interface IMConnectivityCheck {
+  code: IMConnectivityCheckCode;
+  level: IMConnectivityCheckLevel;
+  message: string;
+  suggestion?: string;
+}
+
+export interface IMConnectivityTestResult {
+  platform: Platform;
+  testedAt: number;
+  verdict: IMConnectivityVerdict;
+  checks: IMConnectivityCheck[];
+}
+
+export interface IMConnectivityTestResponse {
+  success: boolean;
+  result?: IMConnectivityTestResult;
+  error?: string;
+}
+
+// ==================== Pairing Types ====================
+
+export interface PairingRequest {
+  id: string;
+  code: string;
+  createdAt: string;
+  lastSeenAt: string;
+  meta?: Record<string, string>;
+}
+
+export interface PairingListResult {
+  success: boolean;
+  requests: PairingRequest[];
+  allowFrom: string[];
+  error?: string;
+}
+
+// ==================== Default Configurations ====================
+
+export const DEFAULT_DINGTALK_OPENCLAW_CONFIG: DingTalkOpenClawConfig = {
+  enabled: false,
+  clientId: '',
+  clientSecret: '',
+  dmPolicy: 'open',
+  allowFrom: [],
+  groupPolicy: 'open',
+  sessionTimeout: 1800000,
+  separateSessionByConversation: true,
+  groupSessionScope: 'group',
+  sharedMemoryAcrossConversations: false,
+  gatewayBaseUrl: '',
+  debug: false,
+};
+
+export const DEFAULT_FEISHU_OPENCLAW_CONFIG: FeishuOpenClawConfig = {
+  enabled: false,
+  appId: '',
+  appSecret: '',
+  domain: 'feishu',
+  dmPolicy: 'open',
+  allowFrom: [],
+  groupPolicy: 'open',
+  groupAllowFrom: [],
+  groups: { '*': { requireMention: true } },
+  historyLimit: 50,
+  streaming: true,
+  replyMode: 'auto',
+  blockStreaming: false,
+  footer: { status: true, elapsed: true },
+  mediaMaxMb: 30,
+  debug: false,
+};
+
+export const DEFAULT_DISCORD_OPENCLAW_CONFIG: DiscordOpenClawConfig = {
+  enabled: false,
+  botToken: '',
+  dmPolicy: 'open',
+  allowFrom: [],
+  groupPolicy: 'allowlist',
+  groupAllowFrom: [],
+  guilds: { '*': { requireMention: true } },
+  historyLimit: 50,
+  streaming: 'off',
+  mediaMaxMb: 25,
+  proxy: '',
+  debug: false,
+};
+
+export const DEFAULT_DISCORD_MULTI_INSTANCE_CONFIG: DiscordMultiInstanceConfig = {
+  instances: [],
+};
+
+export const DEFAULT_TELEGRAM_OPENCLAW_CONFIG: TelegramOpenClawConfig = {
+  enabled: false,
+  botToken: '',
+  dmPolicy: 'open',
+  allowFrom: [],
+  groupPolicy: 'allowlist',
+  groupAllowFrom: [],
+  groups: { '*': { requireMention: true } },
+  historyLimit: 50,
+  replyToMode: 'off',
+  linkPreview: true,
+  streaming: 'partial',
+  mediaMaxMb: 100,
+  proxy: '',
+  webhookUrl: '',
+  webhookSecret: '',
+  debug: false,
+};
+
+export const DEFAULT_TELEGRAM_MULTI_INSTANCE_CONFIG: TelegramMultiInstanceConfig = {
+  instances: [],
+};
+
+export const DEFAULT_QQ_CONFIG: QQOpenClawConfig = {
+  enabled: false,
+  appId: '',
+  appSecret: '',
+  dmPolicy: 'open',
+  allowFrom: [],
+  groupPolicy: 'open',
+  groupAllowFrom: [],
+  historyLimit: 50,
+  markdownSupport: true,
+  imageServerBaseUrl: '',
+  debug: false,
+};
+
+export const DEFAULT_QQ_MULTI_INSTANCE_CONFIG: QQMultiInstanceConfig = {
+  instances: [],
+};
+
+export const DEFAULT_FEISHU_MULTI_INSTANCE_CONFIG: FeishuMultiInstanceConfig = {
+  instances: [],
+};
+
+export const DEFAULT_WECOM_CONFIG: WecomOpenClawConfig = {
+  enabled: false,
+  botId: '',
+  secret: '',
+  dmPolicy: 'open',
+  allowFrom: [],
+  groupPolicy: 'open',
+  groupAllowFrom: [],
+  sendThinkingMessage: true,
+  debug: true,
+};
+
+export const DEFAULT_WECOM_MULTI_INSTANCE_CONFIG: WecomMultiInstanceConfig = { instances: [] };
+
+export const DEFAULT_POPO_CONFIG: PopoOpenClawConfig = {
+  enabled: false,
+  connectionMode: 'websocket',
+  appKey: '',
+  appSecret: '',
+  token: '',
+  aesKey: '',
+  webhookBaseUrl: '',
+  webhookPath: '/popo/callback',
+  webhookPort: 3100,
+  dmPolicy: 'open',
+  allowFrom: [],
+  groupPolicy: 'open',
+  groupAllowFrom: [],
+  textChunkLimit: 3000,
+  richTextChunkLimit: 5000,
+  debug: true,
+};
+
+export const DEFAULT_POPO_MULTI_INSTANCE_CONFIG: PopoMultiInstanceConfig = { instances: [] };
+
+export const DEFAULT_WEIXIN_CONFIG: WeixinOpenClawConfig = {
+  enabled: false,
+  accountId: '',
+  dmPolicy: 'open',
+  allowFrom: [],
+  groupPolicy: 'open',
+  groupAllowFrom: [],
+  debug: true,
+};
+
+export const DEFAULT_IM_SETTINGS: IMSettings = {
+  systemPrompt: '',
+  skillsEnabled: true,
+};
+
+export const DEFAULT_IM_CONFIG: IMGatewayConfig = {
+  dingtalk: DEFAULT_DINGTALK_MULTI_INSTANCE_CONFIG,
+  feishu: DEFAULT_FEISHU_MULTI_INSTANCE_CONFIG,
+  telegram: DEFAULT_TELEGRAM_MULTI_INSTANCE_CONFIG,
+  qq: DEFAULT_QQ_MULTI_INSTANCE_CONFIG,
+  discord: DEFAULT_DISCORD_MULTI_INSTANCE_CONFIG,
+  wecom: DEFAULT_WECOM_MULTI_INSTANCE_CONFIG,
+  popo: DEFAULT_POPO_MULTI_INSTANCE_CONFIG,
+  weixin: DEFAULT_WEIXIN_CONFIG,
+  email: DEFAULT_EMAIL_MULTI_INSTANCE_CONFIG,
+  settings: DEFAULT_IM_SETTINGS,
+};
+
+export const DEFAULT_IM_STATUS: IMGatewayStatus = {
+  dingtalk: {
+    instances: [],
+  },
+  feishu: {
+    instances: [],
+  },
+  telegram: { instances: [] },
+  discord: {
+    instances: [],
+  },
+  qq: {
+    instances: [],
+  },
+  wecom: {
+    instances: [],
+  },
+  popo: {
+    instances: [],
+  },
+  weixin: {
+    connected: false,
+    accountId: null,
+    startedAt: null,
+    lastError: null,
+    lastInboundAt: null,
+    lastOutboundAt: null,
+  },
+  email: {
+    instances: [],
+  },
+};

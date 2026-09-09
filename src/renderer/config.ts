@@ -1,0 +1,265 @@
+import {
+  type BrowserWebAccessConfig,
+  defaultBrowserWebAccessConfig,
+} from '../shared/browserWebAccess/constants';
+import {
+  defaultNotificationSettings,
+  type NotificationSettings,
+} from '../shared/notifications/constants';
+
+export const ShortcutAction = {
+  NewChat: 'newChat',
+  Search: 'search',
+  Settings: 'settings',
+  SendMessage: 'sendMessage',
+  ShowShortcuts: 'showShortcuts',
+  FocusPrompt: 'focusPrompt',
+  StopCurrentTask: 'stopCurrentTask',
+  ToggleSidebar: 'toggleSidebar',
+  ToggleArtifacts: 'toggleArtifacts',
+  PreviousAgent: 'previousAgent',
+  NextAgent: 'nextAgent',
+  ShowCurrentAgentTasks: 'showCurrentAgentTasks',
+  CollapseCurrentAgentTasks: 'collapseCurrentAgentTasks',
+  OpenAgentTask1: 'openAgentTask1',
+  OpenAgentTask2: 'openAgentTask2',
+  OpenAgentTask3: 'openAgentTask3',
+  OpenAgentTask4: 'openAgentTask4',
+  OpenAgentTask5: 'openAgentTask5',
+  OpenAgentTask6: 'openAgentTask6',
+  OpenAgentTask7: 'openAgentTask7',
+  OpenAgentTask8: 'openAgentTask8',
+  OpenAgentTask9: 'openAgentTask9',
+  OpenCowork: 'openCowork',
+  OpenScheduledTasks: 'openScheduledTasks',
+  OpenKits: 'openKits',
+  OpenSkills: 'openSkills',
+  OpenMcp: 'openMcp',
+  OpenSettingsGeneral: 'openSettingsGeneral',
+  OpenSettingsAppearance: 'openSettingsAppearance',
+  OpenSettingsAgentEngine: 'openSettingsAgentEngine',
+  OpenSettingsModel: 'openSettingsModel',
+  OpenSettingsIm: 'openSettingsIm',
+  OpenSettingsBrowser: 'openSettingsBrowser',
+  OpenSettingsEmail: 'openSettingsEmail',
+  OpenSettingsMemory: 'openSettingsMemory',
+  OpenSettingsDreaming: 'openSettingsDreaming',
+  OpenSettingsPlugins: 'openSettingsPlugins',
+  OpenSettingsShortcuts: 'openSettingsShortcuts',
+  OpenSettingsAbout: 'openSettingsAbout',
+} as const;
+
+export type ShortcutAction = typeof ShortcutAction[keyof typeof ShortcutAction];
+
+export type ShortcutConfig = Record<ShortcutAction, string> & {
+  [key: string]: string | undefined;
+};
+
+export const FontPreferences = {
+  UiFontSizeDefault: 15,
+  UiFontSizeMin: 11,
+  UiFontSizeMax: 16,
+  CodeFontSizeDefault: 14,
+  CodeFontSizeMin: 8,
+  CodeFontSizeMax: 24,
+} as const;
+
+// Bump to force-reset every stored uiFontSize / codeFontSize to the current
+// default one more time. hydrateStoredConfig persists the applied versions, so
+// each version resets at most once and later user choices survive upgrades.
+export const UI_FONT_SIZE_MIGRATION_VERSION = 1;
+export const CODE_FONT_SIZE_MIGRATION_VERSION = 1;
+
+export const normalizeFontPreference = (
+  value: unknown,
+  fallback: number,
+  min: number,
+  max: number,
+): number => {
+  const numericValue = typeof value === 'number'
+    ? value
+    : typeof value === 'string'
+      ? Number.parseFloat(value)
+      : Number.NaN;
+  if (!Number.isFinite(numericValue)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, Math.round(numericValue)));
+};
+
+export const resolveArtifactAutoPreviewEnabled = (value: unknown): boolean => value !== false;
+
+// 配置类型定义
+export interface AppConfig {
+  // API 配置
+  api: {
+    key: string;
+    baseUrl: string;
+  };
+  // Legacy per-provider map persisted by pre-enterprise builds. The enterprise
+  // catalog is now the source of truth; this is retained as an optional field
+  // so readers of old persisted configs (getProviderConfig, initial model
+  // bootstrap) type-check. Default configs intentionally omit it.
+  providers?: Record<
+    string,
+    {
+      enabled?: boolean;
+      apiKey?: string;
+      baseUrl?: string;
+      apiFormat?: string;
+      codingPlanEnabled?: boolean;
+      models?: Array<{
+        id: string;
+        name: string;
+        supportsImage?: boolean;
+        supportsVideo?: boolean;
+        supportsThinking?: boolean;
+      }>;
+    }
+  >;
+  // 模型配置
+  model: {
+    availableModels: Array<{
+      id: string;
+      name: string;
+      supportsImage?: boolean;
+      supportsVideo?: boolean;
+      supportsThinking?: boolean;
+      contextWindow?: number;
+      maxTokens?: number;
+    }>;
+    defaultModel: string;
+    defaultModelProvider?: string;
+  };
+  providerModelMigrationVersions?: Record<string, number>;
+  // 主题配置
+  theme: 'light' | 'dark' | 'system';
+  // Optional for configs created before exact default theme persistence was introduced.
+  themeId?: string;
+  // UI 字号配置
+  uiFontSize?: number;
+  // 已应用的 UI 字号强制重置版本(见 UI_FONT_SIZE_MIGRATION_VERSION)
+  uiFontSizeMigrationVersion?: number;
+  // 代码字体大小配置
+  codeFontSize?: number;
+  // 已应用的代码字号强制重置版本(见 CODE_FONT_SIZE_MIGRATION_VERSION)
+  codeFontSizeMigrationVersion?: number;
+  // 语言配置
+  language: 'zh' | 'en';
+  // 是否使用系统代理
+  useSystemProxy: boolean;
+  // 是否在生成可预览内容后自动打开 Artifact 预览面板
+  artifactAutoPreviewEnabled?: boolean;
+  // 是否启用 SQLite 自动备份与恢复
+  sqliteAutoBackupEnabled?: boolean;
+  // 是否允许发送基础产品使用统计
+  usageAnalyticsEnabled?: boolean;
+  // 通知配置
+  notificationSettings?: NotificationSettings;
+  // 浏览器与网页访问配置
+  browserWebAccess: BrowserWebAccessConfig;
+  // 语言初始化标记 (用于判断是否是首次启动)
+  language_initialized?: boolean;
+  // 应用配置
+  app: {
+    port: number;
+    isDevelopment: boolean;
+    testMode?: boolean;
+  };
+  // 快捷键配置
+  shortcuts?: ShortcutConfig;
+}
+
+// 默认配置
+export const defaultConfig: AppConfig = {
+  api: {
+    key: '',
+    baseUrl: 'https://api.deepseek.com',
+  },
+  model: {
+    availableModels: [
+      { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner', supportsImage: false },
+    ],
+    defaultModel: 'deepseek-reasoner',
+    defaultModelProvider: 'deepseek',
+  },
+  theme: 'system',
+  uiFontSize: FontPreferences.UiFontSizeDefault,
+  uiFontSizeMigrationVersion: UI_FONT_SIZE_MIGRATION_VERSION,
+  codeFontSize: FontPreferences.CodeFontSizeDefault,
+  codeFontSizeMigrationVersion: CODE_FONT_SIZE_MIGRATION_VERSION,
+  language: 'zh',
+  useSystemProxy: false,
+  artifactAutoPreviewEnabled: true,
+  sqliteAutoBackupEnabled: false,
+  usageAnalyticsEnabled: true,
+  notificationSettings: defaultNotificationSettings,
+  browserWebAccess: defaultBrowserWebAccessConfig,
+  app: {
+    port: 3000,
+    isDevelopment: process.env.NODE_ENV === 'development',
+    // Default to production (official) services. Source-launched dev builds run
+    // with NODE_ENV=development, but must not auto-target the internal-only test
+    // endpoints (*.inner.youdao.com) — external/open-source users can't reach
+    // them. Flip test mode via the hidden switch in Settings → About when the
+    // internal endpoints are actually needed.
+    testMode: false,
+  },
+  shortcuts: {
+    [ShortcutAction.NewChat]: 'CommandOrControl+N',
+    [ShortcutAction.Search]: 'CommandOrControl+F',
+    [ShortcutAction.Settings]: 'CommandOrControl+,',
+    [ShortcutAction.SendMessage]: 'Enter',
+    [ShortcutAction.ShowShortcuts]: 'CommandOrControl+/',
+    [ShortcutAction.FocusPrompt]: 'CommandOrControl+K',
+    [ShortcutAction.StopCurrentTask]: 'CommandOrControl+.',
+    [ShortcutAction.ToggleSidebar]: 'CommandOrControl+B',
+    [ShortcutAction.ToggleArtifacts]: 'CommandOrControl+Shift+B',
+    [ShortcutAction.PreviousAgent]: '',
+    [ShortcutAction.NextAgent]: '',
+    [ShortcutAction.ShowCurrentAgentTasks]: '',
+    [ShortcutAction.CollapseCurrentAgentTasks]: '',
+    [ShortcutAction.OpenAgentTask1]: '',
+    [ShortcutAction.OpenAgentTask2]: '',
+    [ShortcutAction.OpenAgentTask3]: '',
+    [ShortcutAction.OpenAgentTask4]: '',
+    [ShortcutAction.OpenAgentTask5]: '',
+    [ShortcutAction.OpenAgentTask6]: '',
+    [ShortcutAction.OpenAgentTask7]: '',
+    [ShortcutAction.OpenAgentTask8]: '',
+    [ShortcutAction.OpenAgentTask9]: '',
+    [ShortcutAction.OpenCowork]: 'CommandOrControl+1',
+    [ShortcutAction.OpenScheduledTasks]: 'CommandOrControl+2',
+    [ShortcutAction.OpenKits]: 'CommandOrControl+3',
+    [ShortcutAction.OpenSkills]: 'CommandOrControl+4',
+    [ShortcutAction.OpenMcp]: 'CommandOrControl+5',
+    [ShortcutAction.OpenSettingsGeneral]: '',
+    [ShortcutAction.OpenSettingsAppearance]: '',
+    [ShortcutAction.OpenSettingsAgentEngine]: '',
+    [ShortcutAction.OpenSettingsModel]: '',
+    [ShortcutAction.OpenSettingsIm]: '',
+    [ShortcutAction.OpenSettingsBrowser]: '',
+    [ShortcutAction.OpenSettingsEmail]: '',
+    [ShortcutAction.OpenSettingsMemory]: '',
+    [ShortcutAction.OpenSettingsDreaming]: '',
+    [ShortcutAction.OpenSettingsPlugins]: '',
+    [ShortcutAction.OpenSettingsShortcuts]: '',
+    [ShortcutAction.OpenSettingsAbout]: '',
+  }
+};
+
+// 配置存储键
+export const CONFIG_KEYS = {
+  APP_CONFIG: 'app_config',
+  AUTH: 'auth_state',
+  CONVERSATIONS: 'conversations',
+  PROVIDERS_EXPORT_KEY: 'providers_export_key',
+  SKILLS: 'skills',
+};
+
+/**
+ * Provider keys are now single-provider (genwork-server). This helper exists
+ * for legacy call sites that compare on a per-provider basis; new code should
+ * key off ProviderName.GenworkServer directly.
+ */
+export const getProviderDisplayName = (providerKey: string): string => providerKey;

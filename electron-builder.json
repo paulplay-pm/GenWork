@@ -1,0 +1,278 @@
+{
+  "appId": "com.genwork.app",
+  "productName": "GenWork",
+  "executableName": "GenWork",
+  "directories": {
+    "output": "release"
+  },
+  "beforePack": "./scripts/electron-builder-hooks.cjs",
+  "afterPack": "./scripts/electron-builder-hooks.cjs",
+  "files": [
+    "package.json",
+    "resources/SYSTEM_PROMPT.md",
+    {
+      "from": "dist",
+      "to": "dist",
+      "filter": ["**/*"]
+    },
+    {
+      "from": "dist-electron",
+      "to": "dist-electron",
+      "filter": ["**/*"]
+    },
+    "!**/*.map",
+    "!**/*.d.ts",
+    "!**/*.d.cts",
+    "!**/*.d.mts",
+    "!**/README.md",
+    "!**/README",
+    "!**/readme.md",
+    "!**/CHANGELOG.md",
+    "!**/CHANGELOG",
+    "!**/HISTORY.md",
+    "!**/LICENSE",
+    "!**/LICENSE.md",
+    "!**/LICENSE.txt",
+    "!**/.eslintrc*",
+    "!**/.prettierrc*",
+    "!**/tsconfig.json",
+    "!**/tsconfig.*.json",
+    "!**/*.test.*",
+    "!**/*.spec.*",
+    "!**/tests/**",
+    "!**/test/**",
+    "!**/__tests__/**"
+  ],
+  "extraResources": [
+    {
+      "from": ".keyfrom-build",
+      "to": "keyfrom",
+      "filter": [
+        "**/*"
+      ]
+    },
+    {
+      "from": ".enterprise-build",
+      "to": "enterprise",
+      "filter": [
+        "**/*"
+      ]
+    },
+    {
+      "from": "resources/tray",
+      "to": "tray",
+      "filter": [
+        "**/*"
+      ]
+    },
+    {
+      "from": "resources/app-icon/app-icon.png",
+      "to": "app-icon/app-icon.png"
+    }
+  ],
+  "protocols": [
+    {
+      "name": "GenWork",
+      "schemes": ["genwork"]
+    }
+  ],
+  "mac": {
+    "target": [
+      "dmg"
+    ],
+    "icon": "resources/app-icon/icon.icns",
+    "category": "public.app-category.productivity",
+    "hardenedRuntime": true,
+    "gatekeeperAssess": false,
+    "entitlements": "build/entitlements.mac.plist",
+    "entitlementsInherit": "build/entitlements.mac.plist",
+    "extendInfo": {
+      "CFBundleIconName": "icon",
+      "NSMicrophoneUsageDescription": "GenWork 需要访问您的麦克风来录制语音输入并进行语音识别。",
+      "NSCalendarsUsageDescription": "GenWork 需要访问您的日历来帮助您查看和管理日程安排，例如查找事件、创建会议等。",
+      "NSRemindersUsageDescription": "GenWork 需要访问您的提醒事项来帮助您管理待办事项。",
+      "NSAppleEventsUsageDescription": "GenWork 需要使用 Apple Events 来控制 Calendar 应用执行自动化操作。"
+    },
+    "extraResources": [
+      {
+        "from": "SKILLs",
+        "to": "SKILLs",
+        "filter": [
+          "**/*",
+          "!**/.env",
+          "!**/.env.*",
+          "!**/.venv",
+          "!**/.venv/**",
+          "!**/*.map",
+          "!**/*.d.ts",
+          "!**/*.d.cts",
+          "!**/*.d.mts",
+          "!**/README.md",
+          "!**/README",
+          "!**/readme.md",
+          "!**/CHANGELOG.md",
+          "!**/CHANGELOG",
+          "!**/HISTORY.md",
+          "!**/LICENSE",
+          "!**/LICENSE.md",
+          "!**/LICENSE.txt",
+          "!**/.eslintrc*",
+          "!**/.prettierrc*",
+          "!**/tsconfig.json",
+          "!**/tsconfig.*.json",
+          "!**/*.test.*",
+          "!**/*.spec.*",
+          "!**/tests/**",
+          "!**/test/**",
+          "!**/__tests__/**"
+        ]
+      },
+      {
+        "from": "vendor/openclaw-runtime/current",
+        "to": "openclaw-runtime",
+        "filter": [
+          "**/*",
+          "!**/*.map",
+          "!**/*.d.ts",
+          "!**/*.d.cts",
+          "!**/*.d.mts",
+          "!**/README.md",
+          "!**/README",
+          "!**/readme.md",
+          "!**/CHANGELOG.md",
+          "!**/CHANGELOG",
+          "!**/HISTORY.md",
+          "!**/LICENSE",
+          "!**/LICENSE.md",
+          "!**/LICENSE.txt",
+          "!**/.eslintrc*",
+          "!**/.prettierrc*",
+          "!**/tsconfig.json",
+          "!**/tsconfig.*.json",
+          "!**/*.test.*",
+          "!**/*.spec.*",
+          "!**/tests/**",
+          "!**/test/**",
+          "!**/__tests__/**"
+        ]
+      }
+    ]
+  },
+  "dmg": {
+    "sign": false
+  },
+  "afterSign": "scripts/notarize.js",
+  "win": {
+    "target": [
+      "nsis"
+    ],
+    "icon": "resources/app-icon/app-icon.ico",
+    "requestedExecutionLevel": "asInvoker",
+    "extraResources": [
+      {
+        "from": "resources/app-icon/app-icon.ico",
+        "to": "app-icon/app-icon.ico"
+      },
+      {
+        "from": "build-tar/win-resources.tar",
+        "to": "win-resources.tar"
+      },
+      {
+        "from": "scripts/unpack-runtime.cjs",
+        "to": "unpack-runtime.cjs"
+      }
+    ]
+  },
+  "linux": {
+    "target": [
+      "AppImage",
+      "deb"
+    ],
+    "icon": "build/icons/png",
+    "category": "Utility",
+    "extraResources": [
+      {
+        "from": "SKILLs",
+        "to": "SKILLs",
+        "filter": [
+          "**/*",
+          "!**/.env",
+          "!**/.env.*",
+          "!**/.venv",
+          "!**/.venv/**",
+          "!**/*.map",
+          "!**/*.d.ts",
+          "!**/*.d.cts",
+          "!**/*.d.mts",
+          "!**/README.md",
+          "!**/README",
+          "!**/readme.md",
+          "!**/CHANGELOG.md",
+          "!**/CHANGELOG",
+          "!**/HISTORY.md",
+          "!**/LICENSE",
+          "!**/LICENSE.md",
+          "!**/LICENSE.txt",
+          "!**/.eslintrc*",
+          "!**/.prettierrc*",
+          "!**/tsconfig.json",
+          "!**/tsconfig.*.json",
+          "!**/*.test.*",
+          "!**/*.spec.*",
+          "!**/tests/**",
+          "!**/test/**",
+          "!**/__tests__/**"
+        ]
+      },
+      {
+        "from": "vendor/openclaw-runtime/current",
+        "to": "openclaw-runtime",
+        "filter": [
+          "**/*",
+          "!**/*.map",
+          "!**/*.d.ts",
+          "!**/*.d.cts",
+          "!**/*.d.mts",
+          "!**/README.md",
+          "!**/README",
+          "!**/readme.md",
+          "!**/CHANGELOG.md",
+          "!**/CHANGELOG",
+          "!**/HISTORY.md",
+          "!**/LICENSE",
+          "!**/LICENSE.md",
+          "!**/LICENSE.txt",
+          "!**/.eslintrc*",
+          "!**/.prettierrc*",
+          "!**/tsconfig.json",
+          "!**/tsconfig.*.json",
+          "!**/*.test.*",
+          "!**/*.spec.*",
+          "!**/tests/**",
+          "!**/test/**",
+          "!**/__tests__/**"
+        ]
+      }
+    ],
+    "desktop": {
+      "Name": "GenWork",
+      "Comment": "AI-assisted coding and productivity tool",
+      "Terminal": "false"
+    }
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "runAfterFinish": true,
+    "deleteAppDataOnUninstall": false,
+    "include": "scripts/nsis-installer.nsh"
+  },
+  "electronVersion": "40.2.1",
+  "asarUnpack": [
+    "node_modules/@img/**",
+    "node_modules/better-sqlite3/**",
+    "node_modules/node-nim/**",
+    "node_modules/npm/**"
+  ],
+  "asar": true
+}

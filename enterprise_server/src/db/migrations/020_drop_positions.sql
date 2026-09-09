@@ -1,0 +1,3 @@
+-- v1
+ALTER TABLE users DROP COLUMN IF EXISTS position_id;
+DROP TABLE IF EXISTS positions;

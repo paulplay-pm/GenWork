@@ -1,0 +1,148 @@
+import type { DeliveryMode, SessionTarget, TaskStatus, WakeMode } from './constants';
+
+export interface ScheduleAt {
+  kind: 'at';
+  at: string;
+}
+
+export interface ScheduleEvery {
+  kind: 'every';
+  everyMs: number;
+  anchorMs?: number;
+}
+
+export interface ScheduleCron {
+  kind: 'cron';
+  expr: string;
+  tz?: string;
+  staggerMs?: number;
+}
+
+export type Schedule = ScheduleAt | ScheduleEvery | ScheduleCron;
+
+export interface AgentTurnPayload {
+  kind: 'agentTurn';
+  message: string;
+  timeoutSeconds?: number;
+  model?: string;
+}
+
+export interface SystemEventPayload {
+  kind: 'systemEvent';
+  text: string;
+}
+
+export type ScheduledTaskPayload = AgentTurnPayload | SystemEventPayload;
+
+export interface ScheduledTaskDelivery {
+  mode: DeliveryMode;
+  channel?: string;
+  to?: string;
+  accountId?: string;
+  bestEffort?: boolean;
+}
+
+export type TaskLastStatus = TaskStatus | null;
+
+export interface TaskState {
+  nextRunAtMs: number | null;
+  lastRunAtMs: number | null;
+  lastStatus: TaskLastStatus;
+  lastError: string | null;
+  lastDurationMs: number | null;
+  runningAtMs: number | null;
+  consecutiveErrors: number;
+}
+
+export interface ScheduledTask {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  schedule: Schedule;
+  sessionTarget: SessionTarget;
+  wakeMode: WakeMode;
+  payload: ScheduledTaskPayload;
+  delivery: ScheduledTaskDelivery;
+  agentId: string | null;
+  sessionKey: string | null;
+  state: TaskState;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ScheduledTaskRun {
+  id: string;
+  taskId: string;
+  sessionId: string | null;
+  sessionKey: string | null;
+  status: TaskStatus;
+  startedAt: string;
+  finishedAt: string | null;
+  durationMs: number | null;
+  error: string | null;
+  summary?: string | null;
+  deliveryError?: string | null;
+}
+
+export interface ScheduledTaskRunWithName extends ScheduledTaskRun {
+  taskName: string;
+}
+
+export interface ScheduledTaskInput {
+  name: string;
+  description: string;
+  enabled: boolean;
+  schedule: Schedule;
+  sessionTarget: SessionTarget;
+  wakeMode: WakeMode;
+  payload: ScheduledTaskPayload;
+  delivery?: ScheduledTaskDelivery;
+  agentId?: string | null;
+  sessionKey?: string | null;
+}
+
+export interface ScheduledTaskStatusEvent {
+  taskId: string;
+  state: TaskState;
+}
+
+export interface ScheduledTaskRunEvent {
+  run: ScheduledTaskRunWithName;
+}
+
+export interface ScheduledTaskChannelOption {
+  value: string;
+  label: string;
+  /** Multi-instance platforms use this stable instance selector as
+   *  `delivery.accountId`. Plugins may internally map it to a protocol-level
+   *  account identity such as appKey:accid. */
+  accountId?: string;
+  /** Optional account identifier used only when querying local conversation
+   *  mappings. Some plugins persist a different routing-safe account prefix
+   *  than the delivery-time accountId expected by OpenClaw. */
+  filterAccountId?: string;
+}
+
+export interface ScheduledTaskConversationOption {
+  conversationId: string;
+  platform: string;
+  coworkSessionId: string;
+  lastActiveAt: number;
+  /** Peer kind parsed from the conversationId, when recognizable. */
+  peerKind?: 'direct' | 'group' | 'channel';
+  /** Human-friendly name: a user-renamed Cowork session title when available,
+   *  otherwise the conversation peer id without routing prefixes/domains. */
+  displayName?: string;
+}
+
+export type ScheduledTaskViewMode = 'list' | 'create' | 'edit' | 'detail';
+
+export interface RunFilter {
+  /** ISO date string (YYYY-MM-DD), inclusive lower bound for startedAt */
+  startDate?: string;
+  /** ISO date string (YYYY-MM-DD), inclusive upper bound for startedAt */
+  endDate?: string;
+  /** Filter by task run status */
+  status?: TaskStatus;
+}
